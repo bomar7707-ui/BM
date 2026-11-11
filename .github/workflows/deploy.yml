@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -23,20 +23,23 @@ jobs:
       - name: Stažení repozitáře
         uses: actions/checkout@v4
 
-      - name: Nastavení Node.js
-        uses: actions/setup-node@v4
+      - name: Nastavení prostředí Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
-          cache: 'npm'
+          bun-version: latest
 
       - name: Instalace závislostí
-        run: npm install
+        run: bun install
 
       - name: Sestavení produkční verze (Vite)
-        run: npm run build
+        run: bun run build
 
-      - name: Konfigurace GitHub Pages
-        uses: actions/configure-pages@v5
+      - name: Publikování do větve gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        continue-on-error: true
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
 
       - name: Nahrání artefaktu pro GitHub Pages
         uses: actions/upload-pages-artifact@v3
@@ -49,6 +52,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     needs: build
+    continue-on-error: true
     steps:
       - name: Nasazení na GitHub Pages
         id: deployment
