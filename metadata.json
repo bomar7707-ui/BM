@@ -1,0 +1,6 @@
+{
+  "name": "Horský zápisník a Archív tras",
+  "description": "Zápisník horských výšlapů s cloudovým úložištěm, interaktivní mapou, výškovými profily, analytikou a exporty.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
