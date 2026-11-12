@@ -1,4 +1,4 @@
-# Horský zápisník & Archív tras (Verze 1.1)
+# Horský zápisník & Archív tras (Verze 1.2)
 
 Jednotná webová aplikace pro evidenci horských výšlapů, interaktivní mapový archív GPX tras, plánovač tras, výškové profily s analýzou sklonu terénu, analytiku, horské milníky, správu účastníků s automatickým odesíláním milníků e-mailem a exporty (Excel, PDF, JSON, GPX).
 
@@ -8,7 +8,11 @@ Jednotná webová aplikace pro evidenci horských výšlapů, interaktivní mapo
 
 ## Přehled verzí (Changelog)
 
-### Verze 1.1 (Aktuální)
+### Verze 1.2 (Aktuální)
+- **Označení verze v horní liště (`Navbar.tsx`):** Zobrazení aktuální verze (`v1.2`) přímo vedle tlačítka pro export.
+- **Úprava e-mailového oznámení o milníku (`milestoneCardGenerator.ts`):** České úvodní oznámení a přímý odkaz na veřejnou adresu aplikace `https://bomar7707-ui.github.io/BM/`.
+
+### Verze 1.1
 - **Plánované trasy (`PlannedRoutesView`):** Samostatná sekce s mapovým podkladem a zjednodušeným zápisníkem pro ukládání plánovaných tras (GPX soubory, odkazy na mapu, rozšířené poznámky, automatické barevné odlišení tras na mapě a zvýraznění po kliknutí).
 - **Účastníci (`ParticipantsView`):** Sekce s ikonou turisty v horní liště (mezi Tiskem a Exportem) se seznamem účastníků, zadáním e-mailové adresy a automatickým i ručním odesíláním samostatného grafického certifikátu (PNG karty) při splnění milníku.
 - **Chronologický Tisk a PDF (`PrintReportView` & `pdfCanvas.ts`):** Řazení tras od nejstarší k nejnovější, automatické vkládání splněných milníků přímo mezi trasy podle data splnění a přehled nesplněných milníků na konci sestavy.

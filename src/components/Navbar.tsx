@@ -299,6 +299,14 @@ export const Navbar: React.FC<NavbarProps> = ({
               )}
             </div>
 
+            {/* Version Label next to Export */}
+            <span
+              className="hidden md:inline-block text-[10px] font-medium text-stone-400 select-none ml-0.5"
+              title="Verze aplikace 1.2"
+            >
+              v1.2
+            </span>
+
             {/* Hidden File Inputs (shared between desktop and mobile) */}
             <input
               type="file"
