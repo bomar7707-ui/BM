@@ -250,11 +250,13 @@ export async function sendMilestoneEmailNotification(params: {
   const cleanEmail = email.trim();
   const cardDataUrl = generateMilestoneCardDataUrl(milestone, participantName);
 
+  const appUrl = 'https://bomar7707-ui.github.io/BM/';
   const subject = `🏆 Splněn horský milník: ${milestone.icon} ${milestone.title} (${participantName})`;
   const bodyLines = [
     `Ahoj ${participantName}!`,
     ``,
-    `Gratulujeme! V Horském zápisníku jsi právě splnil(a) nový milník:`,
+    `Právě byl zaznamenán splněný milník na stránce ${appUrl}`,
+    `Zde jsou podrobnosti:`,
     ``,
     `${milestone.icon} ${milestone.title.toUpperCase()}`,
     `Podmínka: ${milestone.explanation}`,
@@ -265,7 +267,7 @@ export async function sendMilestoneEmailNotification(params: {
     `„${milestone.humor}“`,
     ``,
     `---`,
-    `Horský zápisník & Archív tras`,
+    `Horský zápisník & Archív tras (${appUrl})`,
     `KDYŽ NEMÁŠ CESTU, NEMŮŽEŠ ZTRATIT CÍL`,
   ].filter((l) => l !== undefined);
 
@@ -282,6 +284,11 @@ export async function sendMilestoneEmailNotification(params: {
       formData.append('_subject', subject);
       formData.append('_template', 'box');
       formData.append('_captcha', 'false');
+      formData.append(
+        'Oznámení z Horského zápisníku',
+        `Právě byl splněn nový milník v aplikaci Horský zápisník! Zde jsou podrobnosti:`
+      );
+      formData.append('Odkaz na aplikaci', appUrl);
       formData.append('Turista', participantName);
       formData.append('Milník', `${milestone.icon} ${milestone.title}`);
       formData.append('Podmínka splnění', milestone.explanation);
@@ -305,6 +312,7 @@ export async function sendMilestoneEmailNotification(params: {
 
       const response = await fetch(`https://formsubmit.co/ajax/${encodeURIComponent(cleanEmail)}`, {
         method: 'POST',
+        referrerPolicy: 'unsafe-url',
         headers: {
           Accept: 'application/json',
         },
