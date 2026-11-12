@@ -10,4 +10,6 @@ coverage/
 # Dočasné snímky obrazovky a pracovní soubory z konverzace
 public/assets/aistudio/image_*.png
 public/assets/aistudio/*.html
+.versions/
+
 

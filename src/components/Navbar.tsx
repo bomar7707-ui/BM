@@ -14,9 +14,18 @@ import {
   X,
   Compass,
   Trophy,
+  Route,
 } from 'lucide-react';
+import { HikerIcon } from './ParticipantsView';
 
-export type ActiveTab = 'journal' | 'map' | 'analytics' | 'milestones' | 'print';
+export type ActiveTab =
+  | 'journal'
+  | 'map'
+  | 'planned'
+  | 'analytics'
+  | 'milestones'
+  | 'participants'
+  | 'print';
 
 interface NavbarProps {
   activeTab: ActiveTab;
@@ -58,6 +67,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   const navItems = [
     { id: 'map' as ActiveTab, label: 'Mapa a trasy', icon: MapPin, desc: 'Interaktivní zobrazení' },
+    { id: 'planned' as ActiveTab, label: 'Plánované trasy', icon: Route, desc: 'Plánování a GPX' },
     { id: 'journal' as ActiveTab, label: 'Zápisník', icon: BookOpen, desc: 'Zadávání a správa' },
     { id: 'analytics' as ActiveTab, label: 'Analytika', icon: BarChart3, desc: 'Statistiky a rekordy' },
     { id: 'milestones' as ActiveTab, label: 'Milníky', icon: Trophy, desc: 'Výzvy a trofeje' },
@@ -188,6 +198,24 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               <Printer className="w-4 h-4 text-emerald-600 shrink-0" />
               <span>Tisk a PDF</span>
+            </button>
+
+            {/* Desktop Účastníci Button (Hiker icon, placed between Tisk and Export) */}
+            <button
+              type="button"
+              onClick={() => setActiveTab('participants')}
+              className={`hidden md:flex bg-white hover:bg-stone-50 border ${
+                activeTab === 'participants'
+                  ? 'border-emerald-500 text-emerald-700 ring-2 ring-emerald-500/20'
+                  : 'border-stone-200 text-stone-700'
+              } p-2 rounded-xl text-xs transition-all items-center justify-center shadow-xs cursor-pointer`}
+              title="Účastníci a e-mailové notifikace milníků"
+            >
+              <HikerIcon
+                className={`w-4 h-4 ${
+                  activeTab === 'participants' ? 'text-emerald-600' : 'text-stone-600'
+                }`}
+              />
             </button>
 
             {/* Desktop Data & GPX Menu */}
@@ -333,10 +361,25 @@ export const Navbar: React.FC<NavbarProps> = ({
 
               <button
                 onClick={() => {
+                  setActiveTab('planned');
+                  setMobileMenuOpen(false);
+                }}
+                className={`flex items-center gap-2 p-2.5 rounded-xl text-xs font-bold transition-all text-left ${
+                  activeTab === 'planned'
+                    ? 'bg-emerald-600 text-white shadow-sm'
+                    : 'bg-stone-50 text-stone-700 hover:bg-stone-100'
+                }`}
+              >
+                <Route className="w-4 h-4" />
+                <span>Plánované trasy</span>
+              </button>
+
+              <button
+                onClick={() => {
                   setActiveTab('print');
                   setMobileMenuOpen(false);
                 }}
-                className={`flex items-center gap-2 p-2.5 rounded-xl text-xs font-bold transition-all text-left col-span-2 ${
+                className={`flex items-center gap-2 p-2.5 rounded-xl text-xs font-bold transition-all text-left ${
                   activeTab === 'print'
                     ? 'bg-emerald-600 text-white shadow-sm'
                     : 'bg-stone-50 text-stone-700 hover:bg-stone-100'
@@ -344,6 +387,21 @@ export const Navbar: React.FC<NavbarProps> = ({
               >
                 <Printer className="w-4 h-4 text-emerald-600" />
                 <span>Tisk a PDF sestava</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setActiveTab('participants');
+                  setMobileMenuOpen(false);
+                }}
+                className={`flex items-center gap-2 p-2.5 rounded-xl text-xs font-bold transition-all text-left col-span-2 ${
+                  activeTab === 'participants'
+                    ? 'bg-emerald-600 text-white shadow-sm'
+                    : 'bg-stone-50 text-stone-700 hover:bg-stone-100'
+                }`}
+              >
+                <HikerIcon className="w-4 h-4 text-emerald-600" />
+                <span>Účastníci (e-mailové notifikace milníků)</span>
               </button>
             </div>
 

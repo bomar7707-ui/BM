@@ -46,3 +46,25 @@ export interface GlobalStats {
   maxElevation: number;
   maxElevationTripName: string;
 }
+
+export interface PlannedRoute {
+  id: string;
+  name: string;
+  distance: number | string;
+  link?: string;
+  note?: string;
+  color?: string;
+  gpxData?: string | null;
+  gpxName?: string;
+  coordinates?: Coordinate[];
+  routes?: RoutePart[];
+  createdAt?: string;
+}
+
+export interface ParticipantProfile {
+  name: string;
+  email: string;
+  notifiedMilestones?: string[];
+}
+
+

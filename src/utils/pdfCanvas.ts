@@ -1,6 +1,11 @@
 import { jsPDF } from 'jspdf';
 import { Coordinate, Hike, FilterState } from '../types';
 import { getDisplayDateRange } from './dateUtils';
+import {
+  MilestoneStatus,
+  enrichHikesForMilestones,
+  evaluateMilestonesFromEnriched,
+} from './milestonesUtils';
 
 const CZECH_MONTHS: Record<string, string> = {
   '1': 'Leden',
@@ -231,10 +236,172 @@ export function formatFilterSummary(filterState: FilterState): string {
   return parts.join('  •  ');
 }
 
+function drawCompletedMilestoneCard(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  milestone: MilestoneStatus
+) {
+  ctx.save();
+
+  // Warm amber/gold background card
+  drawRoundedRect(ctx, x, y, w, h, 18);
+  const grad = ctx.createLinearGradient(x, y, x + w, y + h);
+  grad.addColorStop(0, '#fffbeb');
+  grad.addColorStop(1, '#fef3c7');
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.strokeStyle = '#f59e0b';
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+
+  // Left accent bar
+  drawRoundedRect(ctx, x + 16, y + 18, 8, h - 36, 4);
+  ctx.fillStyle = '#d97706';
+  ctx.fill();
+
+  // Icon badge circle
+  ctx.beginPath();
+  ctx.arc(x + 72, y + h / 2, 34, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.strokeStyle = '#fbbf24';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.font = '34px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(milestone.icon, x + 72, y + h / 2 + 2);
+  ctx.textBaseline = 'alphabetic';
+
+  // Top label: SPLNĚNÝ MILNÍK + Date
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#b45309';
+  ctx.font = 'bold 14px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  ctx.fillText('🏆 SPLNĚNÝ MILNÍK', x + 124, y + 34);
+
+  if (milestone.completedDate) {
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#92400e';
+    ctx.font = 'bold 15px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx.fillText(`Splněno: ${milestone.completedDate}`, x + w - 24, y + 34);
+    ctx.textAlign = 'left';
+  }
+
+  // Milestone title
+  ctx.fillStyle = '#0f172a';
+  ctx.font = 'bold 22px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  ctx.fillText(milestone.title, x + 124, y + 64);
+
+  // Explanation & current label
+  ctx.fillStyle = '#334155';
+  ctx.font = '600 16px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  const infoText = `${milestone.explanation}  •  ${milestone.currentLabel}`;
+  ctx.fillText(infoText.slice(0, 88), x + 124, y + 92);
+
+  // Completed trip name if present
+  if (milestone.completedTripName) {
+    ctx.fillStyle = '#047857';
+    ctx.font = 'bold 15px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx.fillText(
+      `Pokořeno na trase: ${milestone.completedTripName}`.slice(0, 90),
+      x + 124,
+      y + 118
+    );
+  }
+
+  // Humor quote
+  if (milestone.humor) {
+    ctx.fillStyle = '#78350f';
+    ctx.font = 'italic 14px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    const cleanHumor = `„${milestone.humor.replace(/\s+/g, ' ').trim()}“`;
+    ctx.fillText(
+      cleanHumor.length > 105 ? cleanHumor.slice(0, 102) + '...“' : cleanHumor,
+      x + 124,
+      y + 144
+    );
+  }
+
+  ctx.restore();
+}
+
+function drawUncompletedMilestoneBox(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  milestone: MilestoneStatus
+) {
+  ctx.save();
+
+  drawRoundedRect(ctx, x, y, w, h, 14);
+  ctx.fillStyle = '#f8fafc';
+  ctx.fill();
+  ctx.strokeStyle = '#cbd5e1';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Icon
+  ctx.font = '26px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(milestone.icon, x + 36, y + 38);
+  ctx.textBaseline = 'alphabetic';
+
+  // Title & pct
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#1e293b';
+  ctx.font = 'bold 17px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  ctx.fillText(milestone.title.slice(0, 32), x + 64, y + 34);
+
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#64748b';
+  ctx.font = 'bold 15px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  ctx.fillText(`${Math.round(milestone.progressPct)} %`, x + w - 18, y + 34);
+  ctx.textAlign = 'left';
+
+  // Explanation
+  ctx.fillStyle = '#475569';
+  ctx.font = '500 14px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  ctx.fillText(milestone.explanation.slice(0, 52), x + 64, y + 56);
+
+  // Progress bar background
+  const barX = x + 18;
+  const barY = y + 74;
+  const barW = w - 36;
+  const barH = 10;
+  drawRoundedRect(ctx, barX, barY, barW, barH, 5);
+  ctx.fillStyle = '#e2e8f0';
+  ctx.fill();
+
+  // Progress bar fill
+  const fillW = Math.max(0, Math.min(barW, Math.round((barW * milestone.progressPct) / 100)));
+  if (fillW > 0) {
+    drawRoundedRect(ctx, barX, barY, Math.max(10, fillW), barH, 5);
+    ctx.fillStyle = '#10b981';
+    ctx.fill();
+  }
+
+  // Current & remaining labels
+  ctx.fillStyle = '#334155';
+  ctx.font = 'bold 13px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  ctx.fillText(milestone.currentLabel.slice(0, 54), x + 18, y + 106);
+
+  ctx.fillStyle = '#64748b';
+  ctx.font = '500 13px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  ctx.fillText(milestone.remainingLabel.slice(0, 56), x + 18, y + 128);
+
+  ctx.restore();
+}
+
 export function exportFilteredHikesToPdf(
   hikes: Hike[],
   filterState: FilterState,
-  options: { autoPrint?: boolean; filename?: string } = {}
+  options: { autoPrint?: boolean; filename?: string; milestones?: MilestoneStatus[] } = {}
 ): void {
   const PAGE_W = 1240;
   const PAGE_H = 1754;
@@ -246,9 +413,33 @@ export function exportFilteredHikesToPdf(
     return acc + (isNaN(d) ? 0 : d);
   }, 0);
 
+  const evaluatedMilestones =
+    options.milestones ||
+    evaluateMilestonesFromEnriched(enrichHikesForMilestones(hikes, 'all', 'all'));
+
+  const completedMilestones = evaluatedMilestones.filter((m) => m.isCompleted);
+  const uncompletedMilestones = evaluatedMilestones.filter((m) => !m.isCompleted);
+
+  // Group completed milestones by unlocking hike ID
+  const milestonesByTripId = new Map<string, MilestoneStatus[]>();
+  const unmatchedCompleted: MilestoneStatus[] = [];
+  const hikeIdSet = new Set(hikes.map((h) => h.id));
+
+  completedMilestones.forEach((m) => {
+    if (m.completedTripId && hikeIdSet.has(m.completedTripId)) {
+      const list = milestonesByTripId.get(m.completedTripId) || [];
+      list.push(m);
+      milestonesByTripId.set(m.completedTripId, list);
+    } else {
+      unmatchedCompleted.push(m);
+    }
+  });
+
   const pages: HTMLCanvasElement[] = [];
 
-  const createNewPage = (isFirstPage: boolean): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; startY: number } => {
+  const createNewPage = (
+    isFirstPage: boolean
+  ): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; startY: number } => {
     const canvas = document.createElement('canvas');
     canvas.width = PAGE_W;
     canvas.height = PAGE_H;
@@ -277,7 +468,7 @@ export function exportFilteredHikesToPdf(
       ctx.fillStyle = '#047857';
       ctx.font = '600 20px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
       ctx.fillText(
-        `Přehled výšlapů a turistických tras  •  Celkem ${hikes.length} tras (${totalKm.toFixed(1)} km)`,
+        `Chronologický přehled tras a milníků  •  ${hikes.length} tras (${totalKm.toFixed(1)} km)  •  Splněno ${completedMilestones.length}/${evaluatedMilestones.length} milníků`,
         PAGE_W / 2,
         y + 86
       );
@@ -304,8 +495,10 @@ export function exportFilteredHikesToPdf(
     ctx.textAlign = 'center';
     ctx.fillText('Žádné trasy neodpovídají zvoleným filtrům.', PAGE_W / 2, cursorY + 80);
     ctx.textAlign = 'left';
+    cursorY += 120;
   }
 
+  // 1. Render hikes from oldest to newest, with unlocked milestones interleaved right after each hike
   hikes.forEach((hike, idx) => {
     const hasNote = Boolean(hike.note && hike.note.trim());
     const cardH = hasNote ? 365 : 320;
@@ -444,8 +637,102 @@ export function exportFilteredHikesToPdf(
       );
     }
 
-    cursorY += cardH + 24;
+    cursorY += cardH + 22;
+
+    // Interleave any milestones unlocked on this hike
+    const unlockedHere = milestonesByTripId.get(hike.id) || [];
+    unlockedHere.forEach((milestone) => {
+      const mCardH = 162;
+      if (cursorY + mCardH > PAGE_H - 85) {
+        currentPage = createNewPage(false);
+        cursorY = currentPage.startY;
+      }
+      drawCompletedMilestoneCard(
+        currentPage.ctx,
+        MARGIN_X,
+        cursorY,
+        CONTENT_W,
+        mCardH,
+        milestone
+      );
+      cursorY += mCardH + 22;
+    });
   });
+
+  // Render any completed milestones not matched by trip ID
+  unmatchedCompleted.forEach((milestone) => {
+    const mCardH = 162;
+    if (cursorY + mCardH > PAGE_H - 85) {
+      currentPage = createNewPage(false);
+      cursorY = currentPage.startY;
+    }
+    drawCompletedMilestoneCard(
+      currentPage.ctx,
+      MARGIN_X,
+      cursorY,
+      CONTENT_W,
+      mCardH,
+      milestone
+    );
+    cursorY += mCardH + 22;
+  });
+
+  // 2. Render Uncompleted Milestones at the end ("Nesplněné milníky")
+  if (uncompletedMilestones.length > 0) {
+    const headerH = 74;
+    const rowH = 148;
+    if (cursorY + headerH + rowH > PAGE_H - 85) {
+      currentPage = createNewPage(false);
+      cursorY = currentPage.startY;
+    } else {
+      cursorY += 12;
+    }
+
+    // Section Header for Uncompleted Milestones
+    drawRoundedRect(currentPage.ctx, MARGIN_X, cursorY, CONTENT_W, 58, 14);
+    currentPage.ctx.fillStyle = '#f1f5f9';
+    currentPage.ctx.fill();
+    currentPage.ctx.strokeStyle = '#cbd5e1';
+    currentPage.ctx.lineWidth = 1.5;
+    currentPage.ctx.stroke();
+
+    currentPage.ctx.fillStyle = '#334155';
+    currentPage.ctx.font = 'bold 21px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    currentPage.ctx.fillText(
+      `🎯 Nesplněné milníky (${uncompletedMilestones.length}) – čekají na pokoření`,
+      MARGIN_X + 24,
+      cursorY + 37
+    );
+
+    cursorY += 76;
+
+    const colGap = 20;
+    const colW = Math.floor((CONTENT_W - colGap) / 2);
+
+    for (let i = 0; i < uncompletedMilestones.length; i += 2) {
+      if (cursorY + rowH > PAGE_H - 85) {
+        currentPage = createNewPage(false);
+        cursorY = currentPage.startY;
+      }
+
+      const leftM = uncompletedMilestones[i];
+      drawUncompletedMilestoneBox(currentPage.ctx, MARGIN_X, cursorY, colW, rowH, leftM);
+
+      if (i + 1 < uncompletedMilestones.length) {
+        const rightM = uncompletedMilestones[i + 1];
+        drawUncompletedMilestoneBox(
+          currentPage.ctx,
+          MARGIN_X + colW + colGap,
+          cursorY,
+          colW,
+          rowH,
+          rightM
+        );
+      }
+
+      cursorY += rowH + 18;
+    }
+  }
 
   // Add page numbers to all pages and compile into jsPDF
   const pdf = new jsPDF({

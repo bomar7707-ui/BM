@@ -1,8 +1,20 @@
-# Horský zápisník & Archív tras
+# Horský zápisník & Archív tras (Verze 1.1)
 
-Jednotná webová aplikace pro evidenci horských výšlapů, interaktivní mapový archív GPX tras, výškové profily s analýzou sklonu terénu, analytiku, horské milníky a exporty (Excel, PDF, JSON, GPX).
+Jednotná webová aplikace pro evidenci horských výšlapů, interaktivní mapový archív GPX tras, plánovač tras, výškové profily s analýzou sklonu terénu, analytiku, horské milníky, správu účastníků s automatickým odesíláním milníků e-mailem a exporty (Excel, PDF, JSON, GPX).
 
 > **„KDYŽ NEMÁŠ CESTU, NEMŮŽEŠ ZTRATIT CÍL“**
+
+---
+
+## Přehled verzí (Changelog)
+
+### Verze 1.1 (Aktuální)
+- **Plánované trasy (`PlannedRoutesView`):** Samostatná sekce s mapovým podkladem a zjednodušeným zápisníkem pro ukládání plánovaných tras (GPX soubory, odkazy na mapu, rozšířené poznámky, automatické barevné odlišení tras na mapě a zvýraznění po kliknutí).
+- **Účastníci (`ParticipantsView`):** Sekce s ikonou turisty v horní liště (mezi Tiskem a Exportem) se seznamem účastníků, zadáním e-mailové adresy a automatickým i ručním odesíláním samostatného grafického certifikátu (PNG karty) při splnění milníku.
+- **Chronologický Tisk a PDF (`PrintReportView` & `pdfCanvas.ts`):** Řazení tras od nejstarší k nejnovější, automatické vkládání splněných milníků přímo mezi trasy podle data splnění a přehled nesplněných milníků na konci sestavy.
+
+### Verze 1.0
+- Základní sjednocená aplikace: **Mapa a trasy**, **Zápisník**, **Analytika** (s rozdělením denních a vícedenních kumulovaných rekordů), **Milníky** (30 horských výzev), **Tisk a PDF** a **Export / Záloha**.
 
 ---
 
@@ -14,15 +26,18 @@ Jednotná webová aplikace pro evidenci horských výšlapů, interaktivní mapo
   - Interaktivní výškový profil s barevným rozlišením sklonu terénu (*Rovina < 5 %*, *Standard 5–10 %*, *Prudký 10–20 %*, *Extrém > 20 %*) a synchronizací bodu na mapě.
 - **Zápisník (`HikeForm` & `HikeList`)**
   - Zadávání jednodenních i vícedenních výšlapů, nahrávání GPX souborů k jednotlivým úsekům a automatický součet délek úseků.
-  - Cloudová synchronizace s **Firebase Firestore** (`moje-hory`, kolekce `vyslapy`) + lokální záloha v prohlížeči.
+  - Cloudová synchronizace s **Firebase Firestore** (`moje-hory`, kolekce `vyslapy`, `planovane_trasy`, `ucastnici`) + lokální záloha v prohlížeči.
+- **Plánované trasy (`PlannedRoutesView`)**
+  - Samostatná mapa a zápisník pro chystané výlety s nahráním GPX trasy, odkazem na mapu, poznámkou a automatickým barevným odlišením každé trasy.
 - **Analytika (`AnalyticsView`)**
   - Přehled aktivních dnů, celkové vzdálenosti, nastoupaných a sestoupaných metrů.
   - Samostatné vyhodnocení **Nejdelší denní trasy** vs. **Nejdelší kumulované trasy (vícedenní)** a **Nejvyššího denního stoupání** vs. **Nejvyššího kumulovaného stoupání (vícedenní)**.
   - Graf měsíční aktivity, kalendářová heatmapa, analýza sklonu terénu a výškových zón.
-- **Milníky (`MilestonesView`)**
-  - 30 horských výzev rozdělených do 3 kategorií (Kilometrové výzvy, Výškové milníky, Časové a sezónní milníky) s nezávislým filtrováním podle roku, účastníka a stavu splnění.
+- **Milníky (`MilestonesView`) & Účastníci (`ParticipantsView`)**
+  - 23 horských výzev rozdělených do 3 kategorií (Kilometrové výzvy, Výškové milníky, Časové a sezónní milníky).
+  - Evidence e-mailových adres účastníků a automatické generování a odesílání samostatného milníku na e-mail po jeho splnění.
 - **Tisk a exporty (`PrintReportView`)**
-  - Tisková sestava, export do PDF, Excelu (`.xlsx`) a záloha dat do `.json`.
+  - Chronologická tisková sestava a PDF (od nejstarší trasy po nejnovější s vloženými splněnými milníky a přehledem nesplněných milníků na konci), export do Excelu (`.xlsx`) a záloha dat do `.json`.
 
 ---
 
@@ -42,26 +57,3 @@ Jednotná webová aplikace pro evidenci horských výšlapů, interaktivní mapo
    ```bash
    npm run build
    ```
-
----
-
-## Nasazení na GitHub a GitHub Pages
-
-Projekt je plně připraven k okamžitému nasazení na **GitHub Pages** pomocí připravené GitHub Action (`.github/workflows/deploy.yml`) a relativních cest (`base: './'` ve `vite.config.ts`).
-
-### Postup krok za krokem:
-
-1. **Nahrání kódu do nového GitHub repozitáře:**
-   ```bash
-   git init
-   git add .
-   git commit -m "První verze: Horský zápisník a Archív tras"
-   git branch -M main
-   git remote add origin https://github.com/<vase-jmeno>/<nazev-repozitare>.git
-   git push -u origin main
-   ```
-
-2. **Aktivace GitHub Pages v repozitáři:**
-   - Na GitHubu otevřete svůj repozitář a přejděte do **Settings → Pages**.
-   - V sekci **Build and deployment → Source** vyberte **GitHub Actions**.
-   - Při každém nahrání změn (`git push`) do větve `main` se v záložce **Actions** automaticky spustí workflow **Nasazení na GitHub Pages**, které aplikaci sestaví a publikuje.

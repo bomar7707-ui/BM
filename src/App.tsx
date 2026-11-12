@@ -6,9 +6,11 @@ import { MapView } from './components/MapView';
 import { AnalyticsView } from './components/AnalyticsView';
 import { MilestonesView } from './components/MilestonesView';
 import { PrintReportView } from './components/PrintReportView';
+import { PlannedRoutesView } from './components/PlannedRoutesView';
+import { ParticipantsView } from './components/ParticipantsView';
 import { Toast, ToastType } from './components/Toast';
 import { ConfirmModal } from './components/ConfirmModal';
-import { Hike, FilterState, RoutePart } from './types';
+import { Hike, FilterState, RoutePart, PlannedRoute, ParticipantProfile } from './types';
 import {
   subscribeToHikesLive,
   fetchAllHikes,
@@ -17,9 +19,20 @@ import {
   deleteHike,
   replaceAllHikesInFirebase,
   saveHikesToStorageSafe,
+  subscribeToPlannedRoutesLive,
+  loadPlannedRoutesFromStorage,
+  savePlannedRoutesToStorageSafe,
+  addPlannedRoute,
+  updatePlannedRoute,
+  deletePlannedRoute,
+  loadParticipantsFromStorage,
+  subscribeToParticipantsLive,
+  saveParticipantProfile,
 } from './services/firebase';
 import { exportHikesToExcel } from './utils/excelExport';
 import { calculateDistanceKm, parseGpxXml } from './utils/gpxParser';
+import { evaluateMilestonesForParticipant } from './utils/milestonesUtils';
+import { sendMilestoneEmailNotification, downloadMilestoneCardPng } from './utils/milestoneCardGenerator';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('map');
@@ -37,6 +50,16 @@ export default function App() {
   const [editingHike, setEditingHike] = useState<Hike | null>(null);
   const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
   const [selectedMapIndex, setSelectedMapIndex] = useState<number | null>(null);
+
+  // Isolated state for Planned Routes (Plánované trasy)
+  const [plannedRoutes, setPlannedRoutes] = useState<PlannedRoute[]>(() =>
+    loadPlannedRoutesFromStorage()
+  );
+
+  // Participant profiles (Účastníci - emaily a odeslané milníky)
+  const [participantProfiles, setParticipantProfiles] = useState<Record<string, ParticipantProfile>>(() =>
+    loadParticipantsFromStorage()
+  );
 
   // Journal filter state
   const [filterState, setFilterState] = useState<FilterState>({
@@ -88,6 +111,26 @@ export default function App() {
     };
   }, []);
 
+  // Subscribe to Planned Routes Live Snapshot
+  useEffect(() => {
+    const unsubscribePlanned = subscribeToPlannedRoutesLive((data) => {
+      setPlannedRoutes(data);
+    });
+    return () => {
+      unsubscribePlanned();
+    };
+  }, []);
+
+  // Subscribe to Participant Profiles Live Snapshot
+  useEffect(() => {
+    const unsubscribeParticipants = subscribeToParticipantsLive((data) => {
+      setParticipantProfiles(data);
+    });
+    return () => {
+      unsubscribeParticipants();
+    };
+  }, []);
+
   // Total stats
   const { totalDistance, totalTrips } = useMemo(() => {
     const totalKm = hikes.reduce((sum, h) => {
@@ -100,6 +143,70 @@ export default function App() {
     };
   }, [hikes]);
 
+  // Save participant profile (email / notified milestones)
+  const handleSaveParticipantProfile = useCallback(async (profile: ParticipantProfile) => {
+    await saveParticipantProfile(profile);
+    setParticipantProfiles(loadParticipantsFromStorage());
+  }, []);
+
+  // Check if a newly saved or edited hike unlocked any new milestones for participants with an email
+  const checkAndNotifyNewMilestones = async (
+    previousHikes: Hike[],
+    updatedHikesList: Hike[],
+    participantsStr?: string
+  ) => {
+    if (!participantsStr) return;
+    const names = participantsStr
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+
+    for (const name of names) {
+      const profile = participantProfiles[name];
+      const email = profile?.email?.trim();
+      if (!email) continue;
+
+      const beforeCompleted = new Set(
+        evaluateMilestonesForParticipant(previousHikes, name)
+          .filter((m) => m.isCompleted)
+          .map((m) => m.id)
+      );
+      const afterCompleted = evaluateMilestonesForParticipant(updatedHikesList, name).filter(
+        (m) => m.isCompleted
+      );
+      const alreadyNotified = new Set(profile?.notifiedMilestones || []);
+
+      const newlyUnlocked = afterCompleted.filter(
+        (m) => !beforeCompleted.has(m.id) && !alreadyNotified.has(m.id)
+      );
+
+      if (newlyUnlocked.length > 0) {
+        const nextNotified = Array.from(
+          new Set([...alreadyNotified, ...newlyUnlocked.map((m) => m.id)])
+        );
+
+        await handleSaveParticipantProfile({
+          name,
+          email,
+          notifiedMilestones: nextNotified,
+        });
+
+        for (const milestone of newlyUnlocked) {
+          downloadMilestoneCardPng(milestone, name);
+          await sendMilestoneEmailNotification({
+            participantName: name,
+            email,
+            milestone,
+          });
+          showToast(
+            `Účastník ${name} splnil milník "${milestone.title}"! Oznámení s milníkem bylo odesláno na ${email}.`,
+            'success'
+          );
+        }
+      }
+    }
+  };
+
   // Handle saving new or edited hike
   const handleSaveHike = async (hikeData: {
     name: string;
@@ -110,13 +217,45 @@ export default function App() {
     note?: string;
     routes: RoutePart[];
   }) => {
+    const previousHikes = [...hikes];
+
     if (editingHike) {
       await updateHike(editingHike.id, hikeData);
+      const simulatedUpdated: Hike = {
+        ...editingHike,
+        name: hikeData.name,
+        distance: hikeData.distance.toFixed(1),
+        date: hikeData.date,
+        rawDate: hikeData.date,
+        dateTo: hikeData.dateTo || '',
+        participants: hikeData.participants || '',
+        note: hikeData.note || '',
+        routes: hikeData.routes,
+        maps: hikeData.routes,
+      };
+      const updatedList = previousHikes.map((h) =>
+        h.id === editingHike.id ? simulatedUpdated : h
+      );
       setEditingHike(null);
       showToast('Výšlap byl úspěšně upraven v cloudu', 'success');
+      await checkAndNotifyNewMilestones(previousHikes, updatedList, hikeData.participants);
     } else {
-      await addHike(hikeData);
+      const newId = await addHike(hikeData);
+      const simulatedNew: Hike = {
+        id: newId,
+        name: hikeData.name,
+        distance: hikeData.distance.toFixed(1),
+        date: hikeData.date,
+        rawDate: hikeData.date,
+        dateTo: hikeData.dateTo || '',
+        participants: hikeData.participants || '',
+        note: hikeData.note || '',
+        routes: hikeData.routes,
+        maps: hikeData.routes,
+      };
+      const updatedList = [simulatedNew, ...previousHikes];
       showToast('Nový výšlap byl úspěšně uložen do cloudu', 'success');
+      await checkAndNotifyNewMilestones(previousHikes, updatedList, hikeData.participants);
     }
   };
 
@@ -138,6 +277,98 @@ export default function App() {
         } catch (err: unknown) {
           const e = err as Error;
           showToast(`Chyba při mazání: ${e?.message || 'Zkuste to znovu'}`, 'error');
+        } finally {
+          setConfirmModal((prev) => ({ ...prev, isOpen: false }));
+        }
+      },
+    });
+  };
+
+  // Handle save or update Planned Route
+  const handleSavePlannedRoute = async (
+    routeData: {
+      name: string;
+      distance: number;
+      link?: string;
+      note?: string;
+      color?: string;
+      routes: RoutePart[];
+    },
+    editingId?: string
+  ): Promise<string> => {
+    if (editingId) {
+      const updatedItem: PlannedRoute = {
+        id: editingId,
+        name: routeData.name,
+        distance: routeData.distance.toFixed(1),
+        link: routeData.link || '',
+        note: routeData.note || '',
+        color: routeData.color || '',
+        gpxName: routeData.routes[0]?.gpxName || '',
+        gpxData: routeData.routes[0]?.gpxData || null,
+        coordinates: routeData.routes[0]?.coordinates || [],
+        routes: routeData.routes,
+      };
+      try {
+        await updatePlannedRoute(editingId, routeData);
+        showToast('Plánovaná trasa byla upravena', 'success');
+      } catch {
+        const next = plannedRoutes.map((r) => (r.id === editingId ? updatedItem : r));
+        setPlannedRoutes(next);
+        savePlannedRoutesToStorageSafe(next);
+        showToast('Plánovaná trasa byla upravena lokálně', 'success');
+      }
+      return editingId;
+    } else {
+      try {
+        const newId = await addPlannedRoute(routeData);
+        showToast('Plánovaná trasa byla uložena', 'success');
+        return newId;
+      } catch {
+        const localId = 'plan_' + Date.now();
+        const newItem: PlannedRoute = {
+          id: localId,
+          name: routeData.name,
+          distance: routeData.distance.toFixed(1),
+          link: routeData.link || '',
+          note: routeData.note || '',
+          color: routeData.color || '',
+          gpxName: routeData.routes[0]?.gpxName || '',
+          gpxData: routeData.routes[0]?.gpxData || null,
+          coordinates: routeData.routes[0]?.coordinates || [],
+          routes: routeData.routes,
+          createdAt: new Date().toISOString(),
+        };
+        const next = [newItem, ...plannedRoutes];
+        setPlannedRoutes(next);
+        savePlannedRoutesToStorageSafe(next);
+        showToast('Plánovaná trasa uložena do paměti prohlížeče', 'success');
+        return localId;
+      }
+    }
+  };
+
+  // Handle delete Planned Route
+  const handleDeletePlannedRoute = (id: string) => {
+    const target = plannedRoutes.find((r) => r.id === id);
+    setConfirmModal({
+      isOpen: true,
+      title: 'Smazat plánovanou trasu',
+      message: `Opravdu chcete odstranit plánovanou trasu "${target?.name || 'Zvolená trasa'}"?`,
+      confirmText: 'Ano, smazat',
+      isDestructive: true,
+      onConfirm: async () => {
+        try {
+          await deletePlannedRoute(id);
+          const next = plannedRoutes.filter((r) => r.id !== id);
+          setPlannedRoutes(next);
+          savePlannedRoutesToStorageSafe(next);
+          showToast('Plánovaná trasa byla smazána', 'success');
+        } catch {
+          const next = plannedRoutes.filter((r) => r.id !== id);
+          setPlannedRoutes(next);
+          savePlannedRoutesToStorageSafe(next);
+          showToast('Plánovaná trasa byla odstraněna', 'success');
         } finally {
           setConfirmModal((prev) => ({ ...prev, isOpen: false }));
         }
@@ -471,6 +702,25 @@ export default function App() {
                   setSelectedMapIndex(null);
                   setActiveTab('map');
                 }}
+              />
+            )}
+
+            {/* TAB 5: Plánované trasy (Planned Routes) */}
+            {activeTab === 'planned' && (
+              <PlannedRoutesView
+                plannedRoutes={plannedRoutes}
+                onSavePlannedRoute={handleSavePlannedRoute}
+                onDeletePlannedRoute={handleDeletePlannedRoute}
+              />
+            )}
+
+            {/* TAB 6: Účastníci (Participants & Milestone Email Notifications) */}
+            {activeTab === 'participants' && (
+              <ParticipantsView
+                hikes={hikes}
+                participantProfiles={participantProfiles}
+                onSaveProfile={handleSaveParticipantProfile}
+                onNotify={showToast}
               />
             )}
           </main>

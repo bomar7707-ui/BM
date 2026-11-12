@@ -6,13 +6,14 @@ import {
   collection,
   doc,
   addDoc,
+  setDoc,
   updateDoc,
   deleteDoc,
   getDocs,
   onSnapshot,
   Firestore,
 } from 'firebase/firestore';
-import { Hike, RoutePart } from '../types';
+import { Hike, RoutePart, PlannedRoute, ParticipantProfile } from '../types';
 import { resolveGpxVal, calculateCoordsDistanceKm } from '../utils/gpxParser';
 
 const firebaseConfig = {
@@ -494,3 +495,335 @@ export async function replaceAllHikesInFirebase(newHikes: Hike[]) {
     await addDoc(collection(db, 'vyslapy'), payload);
   }
 }
+
+// ============================================================================
+// PLANNED ROUTES (Plánované trasy) - Separate collection 'planovane_trasy'
+// ============================================================================
+
+const PLANNED_STORAGE_KEY = 'plannedRoutesArchiveData';
+
+export function savePlannedRoutesToStorageSafe(planned: PlannedRoute[]): void {
+  try {
+    const lightweight = planned.map((p) => ({
+      id: p.id,
+      name: p.name,
+      distance: p.distance,
+      link: p.link || '',
+      note: p.note || '',
+      color: p.color || '',
+      gpxName: p.gpxName || '',
+      createdAt: p.createdAt || '',
+      coordinates: p.coordinates || [],
+      routes: (p.routes || []).map((r) => ({
+        distance: r.distance,
+        link: r.link || r.url || '',
+        url: r.url || r.link || '',
+        gpxName: r.gpxName || '',
+        hasGpx: r.hasGpx,
+        visible: r.visible !== false,
+        coordinates: r.coordinates || [],
+      })),
+    }));
+    localStorage.setItem(PLANNED_STORAGE_KEY, JSON.stringify(lightweight));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function loadPlannedRoutesFromStorage(): PlannedRoute[] {
+  try {
+    const raw = localStorage.getItem(PLANNED_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
+async function processPlannedFirestoreDoc(
+  docSnapId: string,
+  data: Record<string, unknown>
+): Promise<PlannedRoute> {
+  const routes = await extractRoutesFromData(data);
+  const directCoords =
+    routes.length > 0 && routes[0].coordinates && routes[0].coordinates.length > 0
+      ? routes[0].coordinates
+      : await resolveGpxVal(data.gpxData || data.gpx || data.coordinates);
+
+  const distNum = parseFloat(String(data.distance || '0'));
+  const explicitSegmentsSum = routes.reduce((sum, r) => {
+    const d = r.distance !== undefined ? parseFloat(String(r.distance)) : NaN;
+    return sum + (!isNaN(d) && d > 0 ? d : 0);
+  }, 0);
+  const calcDist = directCoords.length >= 2 ? calculateCoordsDistanceKm(directCoords) : 0;
+
+  const finalDistNum =
+    !isNaN(distNum) && distNum > 0
+      ? distNum
+      : explicitSegmentsSum > 0
+      ? explicitSegmentsSum
+      : calcDist > 0
+      ? calcDist
+      : 0;
+
+  if (routes.length === 0 && (directCoords.length > 0 || data.link)) {
+    routes.push({
+      distance: Math.round(finalDistNum * 10) / 10,
+      link: String(data.link || ''),
+      url: String(data.link || ''),
+      gpxName: String(data.gpxName || ''),
+      gpxData: typeof data.gpxData === 'string' ? data.gpxData : null,
+      hasGpx: directCoords.length > 0,
+      coordinates: directCoords,
+      visible: true,
+    });
+  }
+
+  return {
+    id: docSnapId,
+    name: String(data.name || 'Plánovaná trasa'),
+    distance: finalDistNum.toFixed(1),
+    link: String(data.link || (routes[0]?.link ?? '')),
+    note: String(data.note || ''),
+    color: typeof data.color === 'string' ? data.color : undefined,
+    gpxName: String(data.gpxName || (routes[0]?.gpxName ?? '')),
+    gpxData: typeof data.gpxData === 'string' ? data.gpxData : null,
+    coordinates: directCoords,
+    routes,
+    createdAt: String(data.createdAt || ''),
+  };
+}
+
+export function subscribeToPlannedRoutesLive(
+  onSuccess: (routes: PlannedRoute[]) => void,
+  onError?: (err: Error) => void
+): () => void {
+  if (!db) {
+    onError?.(new Error('Databáze není inicializována'));
+    return () => {};
+  }
+
+  let cancelled = false;
+  let unsubscribeSnapshot: (() => void) | null = null;
+
+  (async () => {
+    try {
+      await ensureAuth();
+      if (cancelled || !db) return;
+
+      const plannedRef = collection(db, 'planovane_trasy');
+      unsubscribeSnapshot = onSnapshot(
+        plannedRef,
+        async (snapshot) => {
+          try {
+            const promises = snapshot.docs.map((docSnap) =>
+              processPlannedFirestoreDoc(docSnap.id, docSnap.data())
+            );
+            const resolved = await Promise.all(promises);
+            if (cancelled) return;
+            onSuccess(resolved);
+            savePlannedRoutesToStorageSafe(resolved);
+          } catch (err) {
+            console.warn('Error processing planned routes snapshot:', err);
+            if (!cancelled) onError?.(err as Error);
+          }
+        },
+        (error) => {
+          console.warn('Planned routes Firestore subscription warning:', error);
+          if (!cancelled) onError?.(error);
+        }
+      );
+    } catch (err) {
+      if (!cancelled) onError?.(err as Error);
+    }
+  })();
+
+  return () => {
+    cancelled = true;
+    if (unsubscribeSnapshot) {
+      unsubscribeSnapshot();
+    }
+  };
+}
+
+export async function addPlannedRoute(routeData: {
+  name: string;
+  distance: number;
+  link?: string;
+  note?: string;
+  color?: string;
+  routes: RoutePart[];
+}): Promise<string> {
+  if (!db) throw new Error('Databáze není dostupná');
+  await ensureAuth();
+
+  const payload: Record<string, unknown> = {
+    name: routeData.name.trim(),
+    distance: routeData.distance,
+    link: (routeData.link || '').trim(),
+    note: (routeData.note || '').trim(),
+    color: routeData.color || '',
+    createdAt: new Date().toISOString(),
+    routes: serializeRoutesForFirestore(routeData.routes),
+  };
+
+  const docRef = await addDoc(collection(db, 'planovane_trasy'), payload);
+  return docRef.id;
+}
+
+export async function updatePlannedRoute(
+  id: string,
+  routeData: {
+    name: string;
+    distance: number;
+    link?: string;
+    note?: string;
+    color?: string;
+    routes: RoutePart[];
+  }
+): Promise<void> {
+  if (!db) throw new Error('Databáze není dostupná');
+  await ensureAuth();
+
+  const payload: Record<string, unknown> = {
+    name: routeData.name.trim(),
+    distance: routeData.distance,
+    link: (routeData.link || '').trim(),
+    note: (routeData.note || '').trim(),
+    color: routeData.color || '',
+    routes: serializeRoutesForFirestore(routeData.routes),
+  };
+
+  await updateDoc(doc(db, 'planovane_trasy', id), payload);
+}
+
+export async function deletePlannedRoute(id: string): Promise<void> {
+  if (!db) throw new Error('Databáze není dostupná');
+  await ensureAuth();
+  await deleteDoc(doc(db, 'planovane_trasy', id));
+}
+
+// ============================================================================
+// PARTICIPANTS (Účastníci) - Collection 'ucastnici' + localStorage
+// ============================================================================
+
+const PARTICIPANTS_STORAGE_KEY = 'participantsProfilesArchiveData';
+
+export function saveParticipantsToStorage(profiles: Record<string, ParticipantProfile>): void {
+  try {
+    localStorage.setItem(PARTICIPANTS_STORAGE_KEY, JSON.stringify(profiles));
+  } catch {
+    // ignore
+  }
+}
+
+export function loadParticipantsFromStorage(): Record<string, ParticipantProfile> {
+  try {
+    const raw = localStorage.getItem(PARTICIPANTS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') return parsed;
+    }
+  } catch {
+    // ignore
+  }
+  return {};
+}
+
+function getParticipantDocId(name: string): string {
+  return (
+    name
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_|_$/g, '') || 'turista'
+  );
+}
+
+export function subscribeToParticipantsLive(
+  onSuccess: (profiles: Record<string, ParticipantProfile>) => void
+): () => void {
+  if (!db) return () => {};
+
+  let cancelled = false;
+  let unsubscribeSnapshot: (() => void) | null = null;
+
+  (async () => {
+    try {
+      await ensureAuth();
+      if (cancelled || !db) return;
+
+      const ref = collection(db, 'ucastnici');
+      unsubscribeSnapshot = onSnapshot(
+        ref,
+        (snapshot) => {
+          if (cancelled) return;
+          const local = loadParticipantsFromStorage();
+          const merged: Record<string, ParticipantProfile> = { ...local };
+          snapshot.docs.forEach((d) => {
+            const data = d.data();
+            const name = String(data.name || '').trim();
+            if (name) {
+              merged[name] = {
+                name,
+                email: String(data.email || '').trim(),
+                notifiedMilestones: Array.isArray(data.notifiedMilestones)
+                  ? data.notifiedMilestones.map(String)
+                  : merged[name]?.notifiedMilestones || [],
+              };
+            }
+          });
+          saveParticipantsToStorage(merged);
+          onSuccess(merged);
+        },
+        () => {
+          // Ignore if Firestore rules restrict 'ucastnici' collection; localStorage remains active
+        }
+      );
+    } catch {
+      // ignore
+    }
+  })();
+
+  return () => {
+    cancelled = true;
+    if (unsubscribeSnapshot) {
+      unsubscribeSnapshot();
+    }
+  };
+}
+
+export async function saveParticipantProfile(profile: ParticipantProfile): Promise<void> {
+  const current = loadParticipantsFromStorage();
+  current[profile.name.trim()] = {
+    name: profile.name.trim(),
+    email: profile.email.trim(),
+    notifiedMilestones: profile.notifiedMilestones || current[profile.name.trim()]?.notifiedMilestones || [],
+  };
+  saveParticipantsToStorage(current);
+
+  if (!db) return;
+  try {
+    await ensureAuth();
+    const docId = getParticipantDocId(profile.name);
+    await setDoc(
+      doc(db, 'ucastnici', docId),
+      {
+        name: profile.name.trim(),
+        email: profile.email.trim(),
+        notifiedMilestones: current[profile.name.trim()].notifiedMilestones || [],
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+  } catch {
+    // Already persisted in localStorage
+  }
+}
+
+

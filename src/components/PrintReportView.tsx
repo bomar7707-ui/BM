@@ -8,6 +8,8 @@ import {
   Calendar,
   Filter,
   RotateCcw,
+  Trophy,
+  Target,
 } from 'lucide-react';
 import { Hike, Coordinate, FilterState } from '../types';
 import {
@@ -17,6 +19,11 @@ import {
   formatFilterSummary,
 } from '../utils/pdfCanvas';
 import { parseSafeDate, getDisplayDateRange } from '../utils/dateUtils';
+import {
+  MilestoneStatus,
+  enrichHikesForMilestones,
+  evaluateMilestonesFromEnriched,
+} from '../utils/milestonesUtils';
 
 interface PrintReportViewProps {
   hikes: Hike[];
@@ -60,7 +67,7 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
     };
   }, [hikes]);
 
-  // Filter hikes using the same filters selected in "Mapa a trasy" and sort newest to oldest
+  // Filter hikes using the same filters selected in "Mapa a trasy" and sort OLDEST to NEWEST
   const filteredTrips = useMemo(() => {
     return hikes
       .filter((trip) => {
@@ -96,9 +103,45 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
           parseSafeDate(b.date?.split('–')[0]) ||
           parseSafeDate(b.date?.split('-')[0]) ||
           new Date(0);
-        return dateB.getTime() - dateA.getTime();
+        return dateA.getTime() - dateB.getTime();
       });
   }, [hikes, filterState]);
+
+  // Evaluate milestones for the filtered trips
+  const {
+    evaluatedMilestones,
+    completedMilestonesCount,
+    milestonesByTripId,
+    unmatchedCompletedMilestones,
+    uncompletedMilestones,
+  } = useMemo(() => {
+    const enriched = enrichHikesForMilestones(filteredTrips, 'all', 'all');
+    const allMilestones = evaluateMilestonesFromEnriched(enriched);
+    const completed = allMilestones.filter((m) => m.isCompleted);
+    const uncompleted = allMilestones.filter((m) => !m.isCompleted);
+
+    const byTrip = new Map<string, MilestoneStatus[]>();
+    const unmatched: MilestoneStatus[] = [];
+    const tripIdSet = new Set(filteredTrips.map((t) => t.id));
+
+    completed.forEach((m) => {
+      if (m.completedTripId && tripIdSet.has(m.completedTripId)) {
+        const list = byTrip.get(m.completedTripId) || [];
+        list.push(m);
+        byTrip.set(m.completedTripId, list);
+      } else {
+        unmatched.push(m);
+      }
+    });
+
+    return {
+      evaluatedMilestones: allMilestones,
+      completedMilestonesCount: completed.length,
+      milestonesByTripId: byTrip,
+      unmatchedCompletedMilestones: unmatched,
+      uncompletedMilestones: uncompleted,
+    };
+  }, [filteredTrips]);
 
   // Pre-generate thumbnails for filtered trips
   const renderedItems = useMemo(() => {
@@ -135,9 +178,10 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
         index: index + 1,
         shapeImg,
         profileImg,
+        unlockedMilestones: milestonesByTripId.get(hike.id) || [],
       };
     });
-  }, [filteredTrips]);
+  }, [filteredTrips, milestonesByTripId]);
 
   const totalKm = useMemo(() => {
     return filteredTrips.reduce((acc, h) => {
@@ -147,7 +191,7 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
   }, [filteredTrips]);
 
   const handleSavePdf = () => {
-    if (filteredTrips.length === 0) {
+    if (filteredTrips.length === 0 && evaluatedMilestones.length === 0) {
       onNotify?.('Žádné trasy neodpovídají zvoleným filtrům.', 'warning');
       return;
     }
@@ -157,8 +201,12 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
         exportFilteredHikesToPdf(filteredTrips, filterState, {
           autoPrint: false,
           filename: `horsky-zapisnik-sestava-${new Date().toISOString().slice(0, 10)}.pdf`,
+          milestones: evaluatedMilestones,
         });
-        onNotify?.(`PDF sestava (${filteredTrips.length} tras) byla uložena.`, 'success');
+        onNotify?.(
+          `PDF sestava (${filteredTrips.length} tras + milníky) byla uložena.`,
+          'success'
+        );
       } catch (err) {
         console.error('PDF export error:', err);
         onNotify?.('Chyba při generování PDF souboru.', 'error');
@@ -169,7 +217,7 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
   };
 
   const handlePrint = () => {
-    if (filteredTrips.length === 0) {
+    if (filteredTrips.length === 0 && evaluatedMilestones.length === 0) {
       onNotify?.('Žádné trasy neodpovídají zvoleným filtrům.', 'warning');
       return;
     }
@@ -190,6 +238,7 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
           exportFilteredHikesToPdf(filteredTrips, filterState, {
             autoPrint: true,
             filename: `horsky-zapisnik-tisk-${new Date().toISOString().slice(0, 10)}.pdf`,
+            milestones: evaluatedMilestones,
           });
           onNotify?.(
             'Přímý tisk je v náhledovém okně omezen – byl stažen PDF dokument připravený k tisku.',
@@ -207,6 +256,55 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
     filterState.month !== 'all' ||
     filterState.participant !== 'all';
 
+  const renderCompletedMilestoneCard = (milestone: MilestoneStatus) => (
+    <div
+      key={`milestone-${milestone.id}`}
+      className="border-2 border-amber-400 rounded-2xl p-4 sm:p-5 bg-gradient-to-r from-amber-50/95 via-yellow-50/90 to-amber-50/95 break-inside-avoid shadow-xs relative overflow-hidden"
+    >
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-amber-200/80 pb-2.5 mb-3">
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-amber-500 text-white text-[11px] font-extrabold uppercase tracking-wider shadow-2xs">
+            <Trophy className="w-3.5 h-3.5" />
+            Splněný milník
+          </span>
+          <span className="text-xs font-bold text-amber-900">
+            {milestone.currentLabel}
+          </span>
+        </div>
+        {milestone.completedDate && (
+          <span className="text-xs font-bold text-amber-800 flex items-center gap-1">
+            <Calendar className="w-3.5 h-3.5 text-amber-600" />
+            Splněno: {milestone.completedDate}
+          </span>
+        )}
+      </div>
+
+      <div className="flex items-start gap-3.5">
+        <div className="w-12 h-12 rounded-2xl bg-white border-2 border-amber-300 flex items-center justify-center text-2xl shrink-0 shadow-2xs">
+          {milestone.icon}
+        </div>
+        <div className="space-y-1 flex-1 min-w-0">
+          <h4 className="text-base font-black text-slate-900 leading-snug">
+            {milestone.title}
+          </h4>
+          <p className="text-xs font-semibold text-slate-700">
+            {milestone.explanation}
+          </p>
+          {milestone.completedTripName && (
+            <p className="text-xs font-bold text-emerald-800">
+              Pokořeno na trase: {milestone.completedTripName}
+            </p>
+          )}
+          {milestone.humor && (
+            <p className="text-xs italic text-amber-900/90 pt-1">
+              „{milestone.humor}“
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <div className="bg-white min-h-screen text-slate-900">
       {/* Top action bar - hidden on print */}
@@ -223,14 +321,14 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
           <div className="text-center hidden md:block">
             <div className="font-extrabold text-sm">Horský zápisník – Tisková sestava a PDF</div>
             <div className="text-[11px] text-emerald-100">
-              Zobrazeno {filteredTrips.length} z {hikes.length} výšlapů | {totalKm.toFixed(1)} km
+              Chronologicky od nejstarší • {filteredTrips.length} výšlapů ({totalKm.toFixed(1)} km) • Splněno {completedMilestonesCount}/{evaluatedMilestones.length} milníků
             </div>
           </div>
 
           <div className="flex items-center gap-2">
             <button
               onClick={handleSavePdf}
-              disabled={isGeneratingPdf || filteredTrips.length === 0}
+              disabled={isGeneratingPdf || (filteredTrips.length === 0 && evaluatedMilestones.length === 0)}
               className="flex items-center gap-2 bg-white hover:bg-emerald-50 disabled:opacity-60 text-emerald-800 px-4 py-2 rounded-xl font-extrabold text-xs shadow-md transition-all cursor-pointer"
             >
               <Download className="w-4 h-4 text-emerald-600" />
@@ -239,7 +337,7 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
 
             <button
               onClick={handlePrint}
-              disabled={isGeneratingPdf || filteredTrips.length === 0}
+              disabled={isGeneratingPdf || (filteredTrips.length === 0 && evaluatedMilestones.length === 0)}
               className="flex items-center gap-2 bg-emerald-900/60 hover:bg-emerald-900/80 disabled:opacity-60 text-white border border-emerald-400/40 px-4 py-2 rounded-xl font-extrabold text-xs shadow-md transition-all cursor-pointer"
             >
               <Printer className="w-4 h-4" />
@@ -344,96 +442,160 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
             Horský zápisník & Archív tras
           </h1>
           <p className="text-xs sm:text-sm text-slate-600 font-semibold">
-            Přehled výšlapů a turistických tras • Celkem {filteredTrips.length} položek (
-            {totalKm.toFixed(1)} km)
+            Chronologický přehled výšlapů (od nejstaršího) a milníků • Celkem {filteredTrips.length} tras (
+            {totalKm.toFixed(1)} km) • Splněno {completedMilestonesCount}/{evaluatedMilestones.length} milníků
           </p>
           <p className="text-xs text-slate-500 font-medium">
             {formatFilterSummary(filterState)}
           </p>
         </div>
 
-        {/* List of hike cards */}
+        {/* Chronological list of hike cards + interleaved completed milestones */}
         {renderedItems.length === 0 ? (
           <div className="text-center py-12 bg-slate-50 rounded-2xl border border-dashed border-slate-200 text-slate-500 text-sm">
             Žádné trasy neodpovídají zvoleným filtrům.
           </div>
         ) : (
           <div className="space-y-5">
-            {renderedItems.map(({ hike, index, shapeImg, profileImg }) => (
-              <div
-                key={hike.id}
-                className="border border-slate-200 rounded-2xl p-4 sm:p-5 bg-white break-inside-avoid space-y-3 shadow-2xs"
-              >
-                <div className="flex items-baseline justify-between border-b border-slate-100 pb-2.5">
-                  <h3 className="text-base font-bold text-slate-900">
-                    {index}. {hike.name}
-                  </h3>
-                  <span className="text-xs text-slate-500 font-medium flex items-center gap-1">
-                    <Calendar className="w-3.5 h-3.5 text-stone-400" />
-                    {getDisplayDateRange(hike)}
-                  </span>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-4 text-xs text-slate-600">
-                  <span className="flex items-center gap-1 font-semibold text-emerald-800">
-                    <Route className="w-3.5 h-3.5 text-emerald-600" />
-                    Vzdálenost: {hike.distance} km
-                  </span>
-                  {hike.participants && (
-                    <span className="flex items-center gap-1">
-                      <Users className="w-3.5 h-3.5 text-stone-400" />
-                      Účastníci: {hike.participants}
+            {renderedItems.map(({ hike, index, shapeImg, profileImg, unlockedMilestones }) => (
+              <React.Fragment key={hike.id}>
+                {/* Hike Card */}
+                <div className="border border-slate-200 rounded-2xl p-4 sm:p-5 bg-white break-inside-avoid space-y-3 shadow-2xs">
+                  <div className="flex items-baseline justify-between border-b border-slate-100 pb-2.5">
+                    <h3 className="text-base font-bold text-slate-900">
+                      {index}. {hike.name}
+                    </h3>
+                    <span className="text-xs text-slate-500 font-medium flex items-center gap-1">
+                      <Calendar className="w-3.5 h-3.5 text-stone-400" />
+                      {getDisplayDateRange(hike)}
                     </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-4 text-xs text-slate-600">
+                    <span className="flex items-center gap-1 font-semibold text-emerald-800">
+                      <Route className="w-3.5 h-3.5 text-emerald-600" />
+                      Vzdálenost: {hike.distance} km
+                    </span>
+                    {hike.participants && (
+                      <span className="flex items-center gap-1">
+                        <Users className="w-3.5 h-3.5 text-stone-400" />
+                        Účastníci: {hike.participants}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Thumbnails row */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                    {/* Shape preview */}
+                    <div className="bg-slate-50 rounded-xl p-3 border border-slate-100 text-center">
+                      <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">
+                        Tvar trasy
+                      </div>
+                      {shapeImg ? (
+                        <img
+                          src={shapeImg}
+                          alt="Tvar trasy"
+                          className="max-h-28 mx-auto rounded-lg object-contain"
+                        />
+                      ) : (
+                        <div className="h-24 flex items-center justify-center text-xs text-slate-400 italic">
+                          Bez mapových bodů
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Elevation profile preview */}
+                    <div className="bg-slate-50 rounded-xl p-3 border border-slate-100 text-center">
+                      <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">
+                        Výškový profil
+                      </div>
+                      {profileImg ? (
+                        <img
+                          src={profileImg}
+                          alt="Výškový profil"
+                          className="max-h-28 mx-auto rounded-lg object-contain"
+                        />
+                      ) : (
+                        <div className="h-24 flex items-center justify-center text-xs text-slate-400 italic">
+                          Bez výškových dat
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Note if present */}
+                  {hike.note && (
+                    <div className="text-xs text-slate-600 italic bg-slate-50 p-2.5 rounded-lg border-l-2 border-emerald-500">
+                      {hike.note}
+                    </div>
                   )}
                 </div>
 
-                {/* Thumbnails row */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                  {/* Shape preview */}
-                  <div className="bg-slate-50 rounded-xl p-3 border border-slate-100 text-center">
-                    <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">
-                      Tvar trasy
-                    </div>
-                    {shapeImg ? (
-                      <img
-                        src={shapeImg}
-                        alt="Tvar trasy"
-                        className="max-h-28 mx-auto rounded-lg object-contain"
-                      />
-                    ) : (
-                      <div className="h-24 flex items-center justify-center text-xs text-slate-400 italic">
-                        Bez mapových bodů
+                {/* Milestones unlocked on this hike (interleaved chronologically by completion date) */}
+                {unlockedMilestones.map((m) => renderCompletedMilestoneCard(m))}
+              </React.Fragment>
+            ))}
+
+            {/* Fallback for any completed milestones not tied to a specific rendered trip ID */}
+            {unmatchedCompletedMilestones.map((m) => renderCompletedMilestoneCard(m))}
+          </div>
+        )}
+
+        {/* Uncompleted Milestones at the end ("Nesplněné milníky") */}
+        {uncompletedMilestones.length > 0 && (
+          <div className="pt-6 border-t-2 border-slate-200 space-y-4">
+            <div className="flex items-center justify-between bg-slate-100 border border-slate-200 rounded-2xl px-4 py-3 break-inside-avoid">
+              <div className="flex items-center gap-2.5">
+                <Target className="w-5 h-5 text-slate-600" />
+                <div>
+                  <h2 className="text-base sm:text-lg font-extrabold text-slate-800">
+                    Nesplněné milníky ({uncompletedMilestones.length})
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Milníky, které na své pokoření teprve čekají
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+              {uncompletedMilestones.map((m) => (
+                <div
+                  key={m.id}
+                  className="border border-slate-200 rounded-xl p-3.5 bg-slate-50/80 break-inside-avoid space-y-2"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="text-xl shrink-0 opacity-80">{m.icon}</span>
+                      <div className="min-w-0">
+                        <h4 className="text-sm font-bold text-slate-800 truncate">
+                          {m.title}
+                        </h4>
+                        <p className="text-[11px] text-slate-500 leading-tight">
+                          {m.explanation}
+                        </p>
                       </div>
-                    )}
+                    </div>
+                    <span className="text-xs font-extrabold text-slate-600 bg-white border border-slate-200 px-2 py-0.5 rounded-md shrink-0">
+                      {Math.round(m.progressPct)} %
+                    </span>
                   </div>
 
-                  {/* Elevation profile preview */}
-                  <div className="bg-slate-50 rounded-xl p-3 border border-slate-100 text-center">
-                    <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">
-                      Výškový profil
-                    </div>
-                    {profileImg ? (
-                      <img
-                        src={profileImg}
-                        alt="Výškový profil"
-                        className="max-h-28 mx-auto rounded-lg object-contain"
-                      />
-                    ) : (
-                      <div className="h-24 flex items-center justify-center text-xs text-slate-400 italic">
-                        Bez výškových dat
-                      </div>
-                    )}
+                  {/* Progress bar */}
+                  <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-emerald-500 rounded-full transition-all"
+                      style={{ width: `${Math.max(0, Math.min(100, m.progressPct))}%` }}
+                    />
+                  </div>
+
+                  <div className="flex flex-col gap-0.5 text-[11px]">
+                    <span className="font-semibold text-slate-700">{m.currentLabel}</span>
+                    <span className="text-slate-500">{m.remainingLabel}</span>
                   </div>
                 </div>
-
-                {/* Note if present */}
-                {hike.note && (
-                  <div className="text-xs text-slate-600 italic bg-slate-50 p-2.5 rounded-lg border-l-2 border-emerald-500">
-                    {hike.note}
-                  </div>
-                )}
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
         )}
       </div>
