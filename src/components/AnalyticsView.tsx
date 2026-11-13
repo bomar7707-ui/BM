@@ -12,7 +12,21 @@ import {
   Filter,
   CalendarDays,
   Compass,
+  BarChart3,
 } from 'lucide-react';
+import {
+  ResponsiveContainer,
+  ComposedChart,
+  Area,
+  Bar,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  Brush,
+} from 'recharts';
 import { Hike, FilterState } from '../types';
 import { calculateDistanceKm, getSegmentDistanceKm } from '../utils/gpxParser';
 import { parseSafeDate, formatCzechDate } from '../utils/dateUtils';
@@ -322,6 +336,136 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
       },
     };
   }, [filteredHikes]);
+
+  // Detailed cumulative elevation data for each hike (sorted oldest to newest)
+  const cumulativeElevationData = useMemo(() => {
+    const sorted = [...filteredHikes].sort((a, b) => {
+      const dateA =
+        parseSafeDate(a.rawDate) ||
+        parseSafeDate(a.date?.split('–')[0]) ||
+        parseSafeDate(a.date?.split('-')[0]) ||
+        new Date(0);
+      const dateB =
+        parseSafeDate(b.rawDate) ||
+        parseSafeDate(b.date?.split('–')[0]) ||
+        parseSafeDate(b.date?.split('-')[0]) ||
+        new Date(0);
+      return dateA.getTime() - dateB.getTime();
+    });
+
+    let runningAscent = 0;
+    let runningDescent = 0;
+    let runningDistance = 0;
+
+    return sorted.map((trip, index) => {
+      const routes = trip.routes || trip.maps || [];
+      let tripAsc = 0;
+      let tripDesc = 0;
+      let tripMaxEle = 0;
+
+      routes.forEach((m) => {
+        if (!m.coordinates || m.coordinates.length < 2) return;
+        for (let i = 1; i < m.coordinates.length; i++) {
+          const p1 = m.coordinates[i - 1];
+          const p2 = m.coordinates[i];
+          const ele1 =
+            p1.length >= 3 && p1[2] !== null && !isNaN(p1[2] as number) ? (p1[2] as number) : null;
+          const ele2 =
+            p2.length >= 3 && p2[2] !== null && !isNaN(p2[2] as number) ? (p2[2] as number) : null;
+
+          if (ele1 !== null && ele1 > tripMaxEle) tripMaxEle = ele1;
+          if (ele2 !== null && ele2 > tripMaxEle) tripMaxEle = ele2;
+
+          if (ele1 !== null && ele2 !== null) {
+            const diff = ele2 - ele1;
+            if (diff > 0) tripAsc += diff;
+            else tripDesc += Math.abs(diff);
+          }
+        }
+      });
+
+      const ascRounded = Math.round(tripAsc);
+      const descRounded = Math.round(tripDesc);
+      const distNum =
+        typeof trip.distance === 'string' ? parseFloat(trip.distance) || 0 : trip.distance || 0;
+
+      runningAscent += ascRounded;
+      runningDescent += descRounded;
+      runningDistance += distNum;
+
+      const dateStr = formatCzechDate(trip.date || trip.rawDate);
+      const shortName = trip.name.length > 18 ? `${trip.name.slice(0, 16)}…` : trip.name;
+
+      return {
+        index: index + 1,
+        id: trip.id,
+        name: trip.name,
+        shortLabel: `${index + 1}. ${shortName}`,
+        date: dateStr,
+        distance: Number(distNum.toFixed(1)),
+        cumulativeDistance: Number(runningDistance.toFixed(1)),
+        hikeAscent: ascRounded,
+        hikeDescent: descRounded,
+        cumulativeAscent: runningAscent,
+        cumulativeDescent: runningDescent,
+        maxElevation: Math.round(tripMaxEle),
+      };
+    });
+  }, [filteredHikes]);
+
+  // If a single hike is selected, also compute its step-by-step cumulative elevation along the route
+  const singleTripCumulativeProfile = useMemo(() => {
+    if (selectedTripId === 'all' || filteredHikes.length !== 1) return null;
+    const trip = filteredHikes[0];
+    const routes = trip.routes || trip.maps || [];
+    const allCoords = routes.flatMap((r) => r.coordinates || []);
+    const ptsWithEle = allCoords.filter((p) => typeof p[2] === 'number' && !isNaN(p[2] as number));
+    if (ptsWithEle.length < 2) return null;
+
+    let cumDist = 0;
+    let cumAsc = 0;
+    let cumDesc = 0;
+
+    const rawSteps: {
+      distKm: number;
+      altitude: number;
+      cumulativeAscent: number;
+      cumulativeDescent: number;
+    }[] = [
+      {
+        distKm: 0,
+        altitude: Math.round(ptsWithEle[0][2] as number),
+        cumulativeAscent: 0,
+        cumulativeDescent: 0,
+      },
+    ];
+
+    for (let i = 1; i < ptsWithEle.length; i++) {
+      const prev = ptsWithEle[i - 1];
+      const curr = ptsWithEle[i];
+      cumDist += calculateDistanceKm(prev[0], prev[1], curr[0], curr[1]);
+      const diff = (curr[2] as number) - (prev[2] as number);
+      if (diff > 0) cumAsc += diff;
+      else cumDesc += Math.abs(diff);
+
+      rawSteps.push({
+        distKm: Number(cumDist.toFixed(2)),
+        altitude: Math.round(curr[2] as number),
+        cumulativeAscent: Math.round(cumAsc),
+        cumulativeDescent: Math.round(cumDesc),
+      });
+    }
+
+    // Downsample to at most ~120 points for smooth Recharts rendering
+    const maxPts = 120;
+    if (rawSteps.length <= maxPts) return rawSteps;
+    const stride = (rawSteps.length - 1) / (maxPts - 1);
+    const sampled = [];
+    for (let i = 0; i < maxPts; i++) {
+      sampled.push(rawSteps[Math.min(rawSteps.length - 1, Math.round(i * stride))]);
+    }
+    return sampled;
+  }, [selectedTripId, filteredHikes]);
 
   // Target Year for Heatmap
   const heatmapYear = useMemo(() => {
@@ -684,6 +828,255 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
               <div className="text-[11px] text-slate-400 mt-0.5 truncate">Součet klesání</div>
             </div>
           </div>
+        </div>
+
+        {/* Detailed Cumulative Elevation Chart per Hike (Recharts) */}
+        <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                <BarChart3 className="w-4 h-4 text-rose-600" />
+                <span>
+                  {singleTripCumulativeProfile
+                    ? `Detailní graf kumulativního převýšení trasy: ${filteredHikes[0]?.name}`
+                    : 'Detailní graf kumulativního převýšení pro každý výšlap'}
+                </span>
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {singleTripCumulativeProfile
+                  ? 'Průběh kumulovaného stoupání, klesání a nadmořské výšky po kilometrech vybraného výšlapu'
+                  : 'Chronologický nárůst celkového nastoupaného a sestoupaného převýšení napříč jednotlivými výšlapy'}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="px-2.5 py-1 rounded-xl bg-rose-50 text-rose-700 border border-rose-200 font-bold">
+                Kumulativní stoupání: +{analytics.totalAscent.toLocaleString('cs-CZ')} m
+              </span>
+              <span className="px-2.5 py-1 rounded-xl bg-sky-50 text-sky-700 border border-sky-200 font-bold">
+                Kumulativní klesání: -{analytics.totalDescent.toLocaleString('cs-CZ')} m
+              </span>
+            </div>
+          </div>
+
+          {cumulativeElevationData.length === 0 ? (
+            <div className="text-center py-10 text-xs text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+              Pro zvolený filtr nejsou k dispozici žádné výšlapy s výškovými daty.
+            </div>
+          ) : singleTripCumulativeProfile ? (
+            <div className="h-80 sm:h-96 w-full pt-2">
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart
+                  data={singleTripCumulativeProfile}
+                  margin={{ top: 10, right: 20, left: 5, bottom: 10 }}
+                >
+                  <defs>
+                    <linearGradient id="cumAscSingleGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#e11d48" stopOpacity={0.35} />
+                      <stop offset="95%" stopColor="#e11d48" stopOpacity={0.03} />
+                    </linearGradient>
+                    <linearGradient id="cumDescSingleGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#0284c7" stopOpacity={0.28} />
+                      <stop offset="95%" stopColor="#0284c7" stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis
+                    dataKey="distKm"
+                    tick={{ fontSize: 11, fill: '#64748b' }}
+                    tickFormatter={(val) => `${val} km`}
+                  />
+                  <YAxis
+                    yAxisId="cum"
+                    tick={{ fontSize: 11, fill: '#64748b' }}
+                    tickFormatter={(val) => `${val} m`}
+                  />
+                  <YAxis
+                    yAxisId="alt"
+                    orientation="right"
+                    tick={{ fontSize: 11, fill: '#059669' }}
+                    tickFormatter={(val) => `${val} m n.m.`}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                      border: '1px solid #334155',
+                      borderRadius: '12px',
+                      color: '#f8fafc',
+                      fontSize: '12px',
+                    }}
+                    labelStyle={{ color: '#cbd5e1', fontWeight: 700, marginBottom: '4px' }}
+                    labelFormatter={(val) => `Vzdálenost na trase: ${val} km`}
+                    formatter={(value: unknown, name: unknown) => [
+                      `${Number(value).toLocaleString('cs-CZ')} m`,
+                      String(name),
+                    ]}
+                  />
+                  <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '8px' }} />
+                  <Area
+                    yAxisId="cum"
+                    type="monotone"
+                    dataKey="cumulativeAscent"
+                    name="Kumulativní stoupání (+m)"
+                    stroke="#e11d48"
+                    strokeWidth={2.5}
+                    fill="url(#cumAscSingleGrad)"
+                  />
+                  <Area
+                    yAxisId="cum"
+                    type="monotone"
+                    dataKey="cumulativeDescent"
+                    name="Kumulativní klesání (-m)"
+                    stroke="#0284c7"
+                    strokeWidth={2}
+                    fill="url(#cumDescSingleGrad)"
+                  />
+                  <Line
+                    yAxisId="alt"
+                    type="monotone"
+                    dataKey="altitude"
+                    name="Nadmořská výška (m n.m.)"
+                    stroke="#10b981"
+                    strokeWidth={2}
+                    dot={false}
+                  />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <div className="h-85 sm:h-100 w-full pt-2">
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart
+                  data={cumulativeElevationData}
+                  margin={{ top: 10, right: 20, left: 5, bottom: 20 }}
+                >
+                  <defs>
+                    <linearGradient id="cumAscentGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#e11d48" stopOpacity={0.35} />
+                      <stop offset="95%" stopColor="#e11d48" stopOpacity={0.03} />
+                    </linearGradient>
+                    <linearGradient id="cumDescentGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#0284c7" stopOpacity={0.25} />
+                      <stop offset="95%" stopColor="#0284c7" stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis
+                    dataKey="shortLabel"
+                    tick={{ fontSize: 10, fill: '#64748b' }}
+                    interval="preserveStartEnd"
+                    angle={-20}
+                    textAnchor="end"
+                    height={55}
+                  />
+                  <YAxis
+                    yAxisId="cumulative"
+                    tick={{ fontSize: 11, fill: '#64748b' }}
+                    tickFormatter={(val) => `${Number(val).toLocaleString('cs-CZ')} m`}
+                  />
+                  <YAxis
+                    yAxisId="single"
+                    orientation="right"
+                    tick={{ fontSize: 11, fill: '#059669' }}
+                    tickFormatter={(val) => `+${val} m`}
+                  />
+                  <Tooltip
+                    content={({ active, payload }) => {
+                      if (!active || !payload || payload.length === 0) return null;
+                      const row = payload[0].payload as (typeof cumulativeElevationData)[number];
+                      return (
+                        <div className="bg-slate-900/95 text-white p-3 rounded-xl shadow-xl border border-slate-700 text-xs space-y-1.5">
+                          <div className="font-extrabold text-sm text-emerald-400">
+                            {row.index}. {row.name}
+                          </div>
+                          <div className="text-slate-300 text-[11px]">
+                            Datum: <span className="text-white font-semibold">{row.date}</span> •
+                            Délka: <span className="text-white font-semibold">{row.distance} km</span>
+                          </div>
+                          <div className="border-t border-slate-700/80 pt-1.5 space-y-1">
+                            <div className="flex items-center justify-between gap-4">
+                              <span className="text-emerald-300">Stoupání výšlapu:</span>
+                              <span className="font-bold text-white">
+                                +{row.hikeAscent.toLocaleString('cs-CZ')} m
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between gap-4">
+                              <span className="text-amber-300">Klesání výšlapu:</span>
+                              <span className="font-bold text-white">
+                                -{row.hikeDescent.toLocaleString('cs-CZ')} m
+                              </span>
+                            </div>
+                            {row.maxElevation > 0 && (
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="text-indigo-300">Max. výška výšlapu:</span>
+                                <span className="font-bold text-white">
+                                  {row.maxElevation.toLocaleString('cs-CZ')} m n.m.
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                          <div className="border-t border-slate-700/80 pt-1.5 space-y-1">
+                            <div className="flex items-center justify-between gap-4">
+                              <span className="text-rose-400 font-semibold">
+                                Kumulativní stoupání celkem:
+                              </span>
+                              <span className="font-extrabold text-rose-300">
+                                +{row.cumulativeAscent.toLocaleString('cs-CZ')} m
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between gap-4">
+                              <span className="text-sky-400 font-semibold">
+                                Kumulativní klesání celkem:
+                              </span>
+                              <span className="font-extrabold text-sky-300">
+                                -{row.cumulativeDescent.toLocaleString('cs-CZ')} m
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    }}
+                  />
+                  <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '6px' }} />
+                  <Bar
+                    yAxisId="single"
+                    dataKey="hikeAscent"
+                    name="Stoupání daného výšlapu (+m)"
+                    fill="#10b981"
+                    radius={[6, 6, 0, 0]}
+                    maxBarSize={32}
+                  />
+                  <Area
+                    yAxisId="cumulative"
+                    type="monotone"
+                    dataKey="cumulativeAscent"
+                    name="Kumulativní stoupání (+m)"
+                    stroke="#e11d48"
+                    strokeWidth={2.5}
+                    fill="url(#cumAscentGrad)"
+                  />
+                  <Area
+                    yAxisId="cumulative"
+                    type="monotone"
+                    dataKey="cumulativeDescent"
+                    name="Kumulativní klesání (-m)"
+                    stroke="#0284c7"
+                    strokeWidth={2}
+                    fill="url(#cumDescentGrad)"
+                  />
+                  {cumulativeElevationData.length > 10 && (
+                    <Brush
+                      dataKey="shortLabel"
+                      height={22}
+                      stroke="#10b981"
+                      fill="#f8fafc"
+                      travellerWidth={8}
+                    />
+                  )}
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+          )}
         </div>
 
         {/* Gradient Breakdown Card */}

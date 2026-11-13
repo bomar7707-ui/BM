@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useMemo } from 'react';
+import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import L from 'leaflet';
 import {
   Layers,
@@ -28,6 +28,9 @@ import { calculateDistanceKm, parseGpxXml } from '../utils/gpxParser';
 
 interface PlannedRoutesViewProps {
   plannedRoutes: PlannedRoute[];
+  selectedRouteId?: string | null;
+  onSelectRoute?: (id: string | null) => void;
+  onOpen3D?: () => void;
   onSavePlannedRoute: (
     data: {
       name: string;
@@ -62,6 +65,9 @@ export const DISTINCT_ROUTE_COLORS = [
 
 export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
   plannedRoutes,
+  selectedRouteId: externalSelectedRouteId,
+  onSelectRoute,
+  onOpen3D,
   onSavePlannedRoute,
   onDeletePlannedRoute,
 }) => {
@@ -77,8 +83,20 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
   const [leftSidebarOpen, setLeftSidebarOpen] = useState(false);
   const [rightSidebarOpen, setRightSidebarOpen] = useState(false);
 
-  // Selected planned route on map / list
-  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
+  // Selected planned route on map / list (controlled if passed from App, otherwise local)
+  const [internalSelectedRouteId, setInternalSelectedRouteId] = useState<string | null>(null);
+  const selectedRouteId =
+    externalSelectedRouteId !== undefined ? externalSelectedRouteId : internalSelectedRouteId;
+  const setSelectedRouteId = useCallback(
+    (id: string | null) => {
+      if (onSelectRoute) {
+        onSelectRoute(id);
+      } else {
+        setInternalSelectedRouteId(id);
+      }
+    },
+    [onSelectRoute]
+  );
 
   // Hidden planned routes by id
   const [hiddenRoutes, setHiddenRoutes] = useState<Record<string, boolean>>({});
@@ -583,7 +601,7 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
 
   // Elevation Profile Chart Hover Handler
   const handleChartMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!elevationData || !mapInstanceRef.current || elevationData.points.length === 0) return;
+    if (!elevationData || elevationData.points.length === 0) return;
 
     const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -622,13 +640,15 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
 
     const coord = point.coord;
 
-    if (!hoverMarkerRef.current) {
-      hoverMarkerRef.current = L.marker(coord, {
-        icon: L.divIcon({ className: 'elevation-marker', iconSize: [16, 16] }),
-        pane: 'selectedTripPane',
-      }).addTo(mapInstanceRef.current);
-    } else {
-      hoverMarkerRef.current.setLatLng(coord);
+    if (mapInstanceRef.current) {
+      if (!hoverMarkerRef.current) {
+        hoverMarkerRef.current = L.marker(coord, {
+          icon: L.divIcon({ className: 'elevation-marker', iconSize: [16, 16] }),
+          pane: 'selectedTripPane',
+        }).addTo(mapInstanceRef.current);
+      } else {
+        hoverMarkerRef.current.setLatLng(coord);
+      }
     }
   };
 
@@ -928,12 +948,12 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
           </button>
         </div>
 
-        {/* Leaflet Map Div */}
+        {/* 2D Leaflet Map Div */}
         <div ref={mapContainerRef} className="w-full h-full" />
 
         {/* Selected Planned Route Floating Bar (Top Center) */}
         {selectedRoute && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[600] bg-white/95 backdrop-blur-md px-3.5 py-2 rounded-2xl shadow-xl border border-slate-200 flex items-center gap-2 flex-wrap justify-center max-w-[95vw]">
+          <div className="absolute top-14 sm:top-4 left-1/2 -translate-x-1/2 z-[600] bg-white/95 backdrop-blur-md px-3.5 py-2 rounded-2xl shadow-xl border border-slate-200 flex items-center gap-2 flex-wrap justify-center max-w-[95vw]">
             <span
               className="w-3 h-3 rounded-full shrink-0"
               style={{ backgroundColor: routeColorMap[selectedRoute.id] || '#2563eb' }}
@@ -943,6 +963,16 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
             </div>
 
             <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => onOpen3D?.()}
+                className="bg-slate-900 hover:bg-emerald-700 text-white border border-slate-700 px-2.5 py-1 rounded-lg text-xs font-extrabold flex items-center gap-1 shadow-2xs cursor-pointer transition-all"
+                title="Zobrazit vybranou plánovanou trasu ve 3D"
+              >
+                <Mountain className="w-3.5 h-3.5 text-emerald-400" />
+                <span>3D</span>
+              </button>
+
               {(selectedRoute.link || selectedRoute.routes?.[0]?.link) && (
                 <a
                   href={

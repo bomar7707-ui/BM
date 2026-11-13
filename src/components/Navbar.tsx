@@ -21,7 +21,9 @@ import { HikerIcon } from './ParticipantsView';
 export type ActiveTab =
   | 'journal'
   | 'map'
+  | 'route3d'
   | 'planned'
+  | 'planned3d'
   | 'analytics'
   | 'milestones'
   | 'participants'
@@ -101,7 +103,10 @@ export const Navbar: React.FC<NavbarProps> = ({
           <nav className="hidden md:flex items-center gap-1 bg-stone-100/90 p-1 rounded-xl border border-stone-200/80">
             {navItems.map((item) => {
               const Icon = item.icon;
-              const isActive = activeTab === item.id;
+              const isActive =
+                activeTab === item.id ||
+                (item.id === 'map' && activeTab === 'route3d') ||
+                (item.id === 'planned' && activeTab === 'planned3d');
               return (
                 <button
                   key={item.id}
@@ -302,9 +307,9 @@ export const Navbar: React.FC<NavbarProps> = ({
             {/* Version Label next to Export */}
             <span
               className="hidden md:inline-block text-[10px] font-medium text-stone-400 select-none ml-0.5"
-              title="Verze aplikace 1.2"
+              title="Verze aplikace 2.0"
             >
-              v1.2
+              v2.0
             </span>
 
             {/* Hidden File Inputs (shared between desktop and mobile) */}

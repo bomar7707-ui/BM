@@ -3,10 +3,11 @@ import { Navbar, ActiveTab } from './components/Navbar';
 import { HikeForm } from './components/HikeForm';
 import { HikeList } from './components/HikeList';
 import { MapView } from './components/MapView';
+import { Route3DView } from './components/Route3DView';
 import { AnalyticsView } from './components/AnalyticsView';
 import { MilestonesView } from './components/MilestonesView';
 import { PrintReportView } from './components/PrintReportView';
-import { PlannedRoutesView } from './components/PlannedRoutesView';
+import { PlannedRoutesView, DISTINCT_ROUTE_COLORS } from './components/PlannedRoutesView';
 import { ParticipantsView } from './components/ParticipantsView';
 import { Toast, ToastType } from './components/Toast';
 import { ConfirmModal } from './components/ConfirmModal';
@@ -50,6 +51,7 @@ export default function App() {
   const [editingHike, setEditingHike] = useState<Hike | null>(null);
   const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
   const [selectedMapIndex, setSelectedMapIndex] = useState<number | null>(null);
+  const [selectedPlannedRouteId, setSelectedPlannedRouteId] = useState<string | null>(null);
 
   // Isolated state for Planned Routes (Plánované trasy)
   const [plannedRoutes, setPlannedRoutes] = useState<PlannedRoute[]>(() =>
@@ -675,8 +677,23 @@ export default function App() {
                   if (id) setSelectedTripId(id);
                   setActiveTab('analytics');
                 }}
+                onOpen3D={() => setActiveTab('route3d')}
                 onOpenPrint={() => setActiveTab('print')}
                 onRefreshCloud={handleRefreshCloud}
+              />
+            )}
+
+            {/* SKRYTÁ SEKCE: 3D zobrazení vybrané trasy (bez levého panelu, pouze karta vybrané trasy) */}
+            {activeTab === 'route3d' && (
+              <Route3DView
+                trip={hikes.find((h) => h.id === selectedTripId) || null}
+                selectedMapIndex={selectedMapIndex}
+                onSelectSegment={(mIdx) => setSelectedMapIndex(mIdx)}
+                onBackTo2D={() => setActiveTab('map')}
+                onOpenAnalytics={(id) => {
+                  if (id) setSelectedTripId(id);
+                  setActiveTab('analytics');
+                }}
               />
             )}
 
@@ -709,8 +726,32 @@ export default function App() {
             {activeTab === 'planned' && (
               <PlannedRoutesView
                 plannedRoutes={plannedRoutes}
+                selectedRouteId={selectedPlannedRouteId}
+                onSelectRoute={setSelectedPlannedRouteId}
+                onOpen3D={() => setActiveTab('planned3d')}
                 onSavePlannedRoute={handleSavePlannedRoute}
-                onDeletePlannedRoute={handleDeletePlannedRoute}
+                onDeletePlannedRoute={(id) => {
+                  if (selectedPlannedRouteId === id) setSelectedPlannedRouteId(null);
+                  handleDeletePlannedRoute(id);
+                }}
+              />
+            )}
+
+            {/* SKRYTÁ SEKCE: 3D zobrazení vybrané plánované trasy */}
+            {activeTab === 'planned3d' && (
+              <Route3DView
+                plannedRoute={
+                  plannedRoutes.find((r) => r.id === selectedPlannedRouteId) || null
+                }
+                plannedColor={(() => {
+                  const idx = plannedRoutes.findIndex((r) => r.id === selectedPlannedRouteId);
+                  const found = idx >= 0 ? plannedRoutes[idx] : null;
+                  return (
+                    found?.color ||
+                    DISTINCT_ROUTE_COLORS[Math.max(0, idx) % DISTINCT_ROUTE_COLORS.length]
+                  );
+                })()}
+                onBackTo2D={() => setActiveTab('planned')}
               />
             )}
 

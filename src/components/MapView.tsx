@@ -26,7 +26,6 @@ import {
 import { Hike, Coordinate, FilterState } from '../types';
 import { calculateDistanceKm, getSegmentDistanceKm } from '../utils/gpxParser';
 import { parseSafeDate, getDisplayDateRange } from '../utils/dateUtils';
-
 interface MapViewProps {
   hikes: Hike[];
   filterState: FilterState;
@@ -35,6 +34,7 @@ interface MapViewProps {
   selectedMapIndex: number | null;
   onSelectTrip: (tripId: string | null, mapIndex?: number | null) => void;
   onOpenAnalytics: (tripId?: string) => void;
+  onOpen3D?: () => void;
   onOpenPrint?: () => void;
   onRefreshCloud: () => Promise<void>;
 }
@@ -61,6 +61,7 @@ export const MapView: React.FC<MapViewProps> = ({
   selectedMapIndex,
   onSelectTrip,
   onOpenAnalytics,
+  onOpen3D,
   onRefreshCloud,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -516,7 +517,7 @@ export const MapView: React.FC<MapViewProps> = ({
 
   // Elevation Profile Chart Hover Handler
   const handleChartMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!elevationData || !mapInstanceRef.current || elevationData.points.length === 0) return;
+    if (!elevationData || elevationData.points.length === 0) return;
 
     const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -555,13 +556,15 @@ export const MapView: React.FC<MapViewProps> = ({
 
     const coord = point.coord;
 
-    if (!hoverMarkerRef.current) {
-      hoverMarkerRef.current = L.marker(coord, {
-        icon: L.divIcon({ className: 'elevation-marker', iconSize: [16, 16] }),
-        pane: 'selectedTripPane',
-      }).addTo(mapInstanceRef.current);
-    } else {
-      hoverMarkerRef.current.setLatLng(coord);
+    if (mapInstanceRef.current) {
+      if (!hoverMarkerRef.current) {
+        hoverMarkerRef.current = L.marker(coord, {
+          icon: L.divIcon({ className: 'elevation-marker', iconSize: [16, 16] }),
+          pane: 'selectedTripPane',
+        }).addTo(mapInstanceRef.current);
+      } else {
+        hoverMarkerRef.current.setLatLng(coord);
+      }
     }
   };
 
@@ -731,17 +734,27 @@ export const MapView: React.FC<MapViewProps> = ({
           </button>
         </div>
 
-        {/* Leaflet Map Div */}
+        {/* 2D Leaflet Map Div */}
         <div ref={mapContainerRef} className="w-full h-full" />
 
         {/* Selected Trip Floating Bar (Top Center) */}
         {selectedTrip && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[600] bg-white/95 backdrop-blur-md px-3.5 py-2 rounded-2xl shadow-xl border border-slate-200 flex items-center gap-2 flex-wrap justify-center max-w-[95vw]">
+          <div className="absolute top-14 sm:top-4 left-1/2 -translate-x-1/2 z-[600] bg-white/95 backdrop-blur-md px-3.5 py-2 rounded-2xl shadow-xl border border-slate-200 flex items-center gap-2 flex-wrap justify-center max-w-[95vw]">
             <div className="font-extrabold text-xs text-stone-900 truncate max-w-[180px] sm:max-w-[260px]">
               {selectedTrip.name}
             </div>
 
             <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => onOpen3D?.()}
+                className="bg-slate-900 hover:bg-emerald-700 text-white border border-slate-700 px-2.5 py-1 rounded-lg text-xs font-extrabold flex items-center gap-1 shadow-2xs cursor-pointer transition-all"
+                title="Zobrazit vybranou trasu ve 3D"
+              >
+                <Mountain className="w-3.5 h-3.5 text-emerald-400" />
+                <span>3D</span>
+              </button>
+
               <button
                 onClick={() => onOpenAnalytics(selectedTrip.id)}
                 className="bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200 px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1 shadow-2xs"
