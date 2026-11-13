@@ -17,6 +17,7 @@ import {
   Route,
 } from 'lucide-react';
 import { HikerIcon } from './ParticipantsView';
+import { LOGO_DATA_URL } from '../assets/logoDataUrl';
 
 export type ActiveTab =
   | 'journal'
@@ -86,7 +87,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               className="flex items-center gap-2.5 text-left group cursor-pointer"
             >
               <img
-                src="/logo.png?v=2"
+                src={LOGO_DATA_URL}
                 alt="Horský zápisník logo"
                 className="w-11 h-11 rounded-full object-contain shadow-sm group-hover:scale-105 transition-transform shrink-0"
               />
@@ -309,9 +310,9 @@ export const Navbar: React.FC<NavbarProps> = ({
             {/* Version Label next to Export */}
             <span
               className="hidden md:inline-block text-[10px] font-medium text-stone-400 select-none ml-0.5"
-              title="Verze aplikace 2.5"
+              title="Verze aplikace 2.5.1"
             >
-              v2.5
+              v2.5.1
             </span>
 
             {/* Hidden File Inputs (shared between desktop and mobile) */}
