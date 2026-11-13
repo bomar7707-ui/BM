@@ -1,37 +1,17 @@
 {
-  "id": "/",
   "name": "Horský zápisník a Archív tras",
-  "short_name": "Horský záp.",
-  "description": "Zápisník horských výšlapů s cloudovým úložištěm, interaktivní mapou, 3D diorámou terénu, výškovými profily a analytikou.",
-  "start_url": "/",
-  "scope": "/",
+  "short_name": "Horský zápisník",
+  "description": "Zápisník horských výšlapů s cloudovým úložištěm, interaktivní 2D/3D mapou, výškovými profily, analytikou a exporty.",
+  "start_url": "./",
   "display": "standalone",
   "background_color": "#f5f5f4",
-  "theme_color": "#059669",
+  "theme_color": "#2f4f3a",
   "icons": [
     {
-      "src": "/icon.svg",
+      "src": "./icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
-      "purpose": "any"
-    },
-    {
-      "src": "/pwa-192x192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/pwa-512x512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/pwa-maskable-512x512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "maskable"
+      "purpose": "any maskable"
     }
   ]
 }
