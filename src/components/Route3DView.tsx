@@ -22,6 +22,7 @@ import {
   ChevronUp,
   ChevronDown,
   TrendingUp,
+  Compass,
 } from 'lucide-react';
 import { Hike, Coordinate, PlannedRoute, RoutePart } from '../types';
 import { calculateDistanceKm, getSegmentDistanceKm } from '../utils/gpxParser';
@@ -32,7 +33,290 @@ import {
   BaseMapStyle3D,
   Terrain3DMapHandle,
   FlightTelemetryState,
+  DioramaPOI,
+  DioramaPOICategory,
 } from './Terrain3DMap';
+
+const MAPY_CZ_POI_API_KEY = '3SfstVBaZryBHeEkOsw_DSAc8PwcV140TQvNslWDrQY';
+
+// Automatically discover significant peaks & points of interest along a route via Mapy.cz POI API
+async function fetchRoutePeaksAndPOIs(
+  coords: Coordinate[],
+  routeName: string,
+  signal: AbortSignal
+): Promise<DioramaPOI[]> {
+  if (coords.length < 2) return [];
+
+  // 1. Subsample route coordinates and compute cumulative distance along the route
+  const step = Math.max(1, Math.floor(coords.length / 350));
+  const sampleCoords: { lat: number; lon: number; ele: number | null; distKm: number }[] = [];
+  let totalDistKm = 0;
+
+  for (let i = 0; i < coords.length; i += step) {
+    const c = coords[i];
+    if (sampleCoords.length > 0) {
+      const prev = sampleCoords[sampleCoords.length - 1];
+      totalDistKm += calculateDistanceKm(prev.lat, prev.lon, c[0], c[1]);
+    }
+    sampleCoords.push({
+      lat: c[0],
+      lon: c[1],
+      ele: typeof c[2] === 'number' && !isNaN(c[2]) ? Math.round(c[2]) : null,
+      distKm: totalDistKm,
+    });
+  }
+
+  // 2. Select anchor points along the route (local elevation peaks + evenly spaced milestones)
+  const anchors: { lat: number; lon: number }[] = [];
+  const minAnchorSpacingKm = Math.max(3.5, totalDistKm / 9);
+
+  const addAnchorIfSpaced = (lat: number, lon: number) => {
+    const tooClose = anchors.some(
+      (a) => calculateDistanceKm(a.lat, a.lon, lat, lon) < minAnchorSpacingKm
+    );
+    if (!tooClose) {
+      anchors.push({ lat, lon });
+    }
+  };
+
+  // First add prominent elevation points from the GPX profile
+  const sortedByEle = [...sampleCoords]
+    .filter((p) => p.ele !== null)
+    .sort((a, b) => (b.ele ?? 0) - (a.ele ?? 0));
+
+  for (const pt of sortedByEle) {
+    addAnchorIfSpaced(pt.lat, pt.lon);
+    if (anchors.length >= 6) break;
+  }
+
+  // Also ensure full spatial coverage along the entire route from Start to Finish
+  const numMilestones = Math.min(8, Math.max(3, Math.ceil(totalDistKm / 12)));
+  for (let m = 0; m < numMilestones; m++) {
+    const idx = Math.min(
+      sampleCoords.length - 1,
+      Math.floor((m / Math.max(1, numMilestones - 1)) * (sampleCoords.length - 1))
+    );
+    const pt = sampleCoords[idx];
+    if (pt) addAnchorIfSpaced(pt.lat, pt.lon);
+    if (anchors.length >= 9) break;
+  }
+
+  // 3. Query Mapy.cz Geocode POI API around each anchor for peaks, towers/viewpoints, huts, and historic sites
+  interface MapyGeocodeItem {
+    name: string;
+    label?: string;
+    type?: string;
+    position?: { lon: number; lat: number };
+  }
+
+  const searchTerms: { q: string; defaultCat: DioramaPOICategory; limit: number }[] = [
+    { q: 'hora', defaultCat: 'peak', limit: 15 },
+    { q: 'rozhledna', defaultCat: 'viewpoint', limit: 10 },
+    { q: 'vyhlídka', defaultCat: 'viewpoint', limit: 8 },
+    { q: 'turistická chata', defaultCat: 'hut', limit: 10 },
+    { q: 'sedlo', defaultCat: 'saddle', limit: 8 },
+    { q: 'zřícenina', defaultCat: 'historic', limit: 8 },
+  ];
+
+  // For secondary categories on long routes, query a subset of anchors to keep requests super fast
+  const primaryAnchors = anchors;
+  const secondaryAnchors = anchors.filter(
+    (_, idx) => idx === 0 || idx === anchors.length - 1 || idx % 2 === 0
+  );
+
+  const requests: Promise<{ items: MapyGeocodeItem[]; defaultCat: DioramaPOICategory }>[] = [];
+
+  for (const term of searchTerms) {
+    const targetAnchors =
+      term.q === 'hora' || term.q === 'rozhledna' ? primaryAnchors : secondaryAnchors;
+
+    for (const anchor of targetAnchors) {
+      const url = `https://api.mapy.cz/v1/geocode?query=${encodeURIComponent(
+        term.q
+      )}&type=poi&lang=cs&limit=${term.limit}&preferNear=${anchor.lon.toFixed(
+        5
+      )},${anchor.lat.toFixed(5)}&preferNearPrecision=5500&apikey=${MAPY_CZ_POI_API_KEY}`;
+
+      requests.push(
+        fetch(url, { signal })
+          .then((r) => (r.ok ? r.json() : { items: [] }))
+          .then((json) => ({
+            items: Array.isArray(json?.items) ? json.items : [],
+            defaultCat: term.defaultCat,
+          }))
+          .catch(() => ({ items: [], defaultCat: term.defaultCat }))
+      );
+    }
+  }
+
+  const responses = await Promise.all(requests);
+  if (signal.aborted) return [];
+
+  const maxCorridorKm = totalDistKm > 35 ? 2.4 : 1.75;
+
+  const getRouteProximity = (lat: number, lon: number) => {
+    let minD = Infinity;
+    let nearestEle: number | null = null;
+    let routeKmAtNearest = 0;
+    for (const pt of sampleCoords) {
+      const d = calculateDistanceKm(lat, lon, pt.lat, pt.lon);
+      if (d < minD) {
+        minD = d;
+        nearestEle = pt.ele;
+        routeKmAtNearest = pt.distKm;
+      }
+    }
+    return { minD, nearestEle, routeKmAtNearest };
+  };
+
+  const candidates: (DioramaPOI & { priority: number; routeKm: number })[] = [];
+
+  for (const group of responses) {
+    for (const item of group.items) {
+      const lat = item.position?.lat;
+      const lon = item.position?.lon;
+      if (typeof lat !== 'number' || typeof lon !== 'number' || !item.name) continue;
+
+      const labelLower = (item.label || '').toLowerCase();
+      const rawName = item.name.trim();
+
+      // Filter out irrelevant urban POIs (e.g. shops, generic bus stops, streets)
+      if (
+        labelLower.includes('zastávka') ||
+        labelLower.includes('ulice') ||
+        labelLower.includes('obchod') ||
+        labelLower.includes('bankomat') ||
+        labelLower.includes('parkoviště')
+      ) {
+        continue;
+      }
+
+      const { minD, nearestEle, routeKmAtNearest } = getRouteProximity(lat, lon);
+      if (minD > maxCorridorKm) continue;
+
+      // Extract elevation if included in Mapy.cz name, e.g. "Slavíč (1055 m)" or "Velká Deštná (1 116 m)"
+      let parsedEle: number | null = null;
+      let cleanName = rawName;
+      const eleMatch = rawName.match(/\(\s*([0-9\s\u00a0]+)\s*m\s*\)/i);
+      if (eleMatch) {
+        const digits = eleMatch[1].replace(/[\s\u00a0]/g, '');
+        const num = parseInt(digits, 10);
+        if (!isNaN(num) && num > 100 && num < 9000) {
+          parsedEle = num;
+        }
+        cleanName = rawName.replace(eleMatch[0], '').trim();
+      }
+
+      if (parsedEle === null && minD < 0.25 && nearestEle !== null) {
+        parsedEle = nearestEle;
+      }
+
+      let category: DioramaPOICategory = group.defaultCat;
+      let priority = 70;
+
+      if (labelLower.includes('hora') || labelLower.includes('výškový bod') || labelLower.includes('vrchol')) {
+        category = 'peak';
+        priority = 105;
+      } else if (labelLower.includes('rozhledna') || labelLower.includes('vyhlídka')) {
+        category = 'viewpoint';
+        priority = 96;
+      } else if (
+        labelLower.includes('chata') ||
+        labelLower.includes('bouda') ||
+        labelLower.includes('útulna') ||
+        /chata|bouda|útulna|koliba|schronisko/i.test(cleanName)
+      ) {
+        category = 'hut';
+        priority = 88;
+      } else if (
+        labelLower.includes('hrad') ||
+        labelLower.includes('zřícenina') ||
+        labelLower.includes('tvrz') ||
+        labelLower.includes('pevnost') ||
+        labelLower.includes('kaple')
+      ) {
+        category = 'historic';
+        priority = 84;
+      } else if (labelLower.includes('sedlo')) {
+        category = 'saddle';
+        priority = 78;
+      } else if (labelLower.includes('pramen') || labelLower.includes('studánka')) {
+        category = 'spring';
+        priority = 72;
+      } else if (group.defaultCat === 'peak' && !parsedEle) {
+        // Skip non-peak items returned by "hora" query (e.g. municipality names)
+        continue;
+      }
+
+      const proximityBonus = Math.max(0, (maxCorridorKm - minD) * 26);
+      const eleBonus = parsedEle ? parsedEle / 100 : 0;
+
+      candidates.push({
+        id: `mapy_${category}_${lat.toFixed(4)}_${lon.toFixed(4)}`,
+        name: cleanName,
+        lat,
+        lon,
+        ele: parsedEle,
+        category,
+        distanceFromRouteKm: minD,
+        priority: priority + proximityBonus + eleBonus,
+        routeKm: routeKmAtNearest,
+      });
+    }
+  }
+
+  // Sort by priority to pick the best non-overlapping peaks & POIs along the route
+  candidates.sort((a, b) => b.priority - a.priority);
+
+  const maxPois = totalDistKm > 40 ? 15 : 10;
+  const minPoiSpacingKm = Math.max(0.45, totalDistKm / 45);
+  const selected: (DioramaPOI & { routeKm: number })[] = [];
+  const seenNames = new Set<string>();
+
+  for (const cand of candidates) {
+    const normName = cand.name.toLowerCase();
+    if (seenNames.has(normName)) continue;
+
+    const tooClose = selected.some(
+      (s) => calculateDistanceKm(s.lat, s.lon, cand.lat, cand.lon) < minPoiSpacingKm
+    );
+    if (tooClose) continue;
+
+    seenNames.add(normName);
+    selected.push(cand);
+    if (selected.length >= maxPois) break;
+  }
+
+  // Order selected POIs along the route progression from START to CÍL
+  selected.sort((a, b) => a.routeKm - b.routeKm);
+
+  // Fallback if offline
+  if (selected.length === 0) {
+    let maxEle = -Infinity;
+    let bestPt: Coordinate | null = null;
+    for (const c of coords) {
+      if (typeof c[2] === 'number' && !isNaN(c[2]) && c[2] > maxEle) {
+        maxEle = c[2];
+        bestPt = c;
+      }
+    }
+    if (bestPt && isFinite(maxEle)) {
+      return [
+        {
+          id: 'local_peak_main',
+          name: `Nejvyšší bod (${routeName})`,
+          lat: bestPt[0],
+          lon: bestPt[1],
+          ele: Math.round(maxEle),
+          category: 'peak',
+          distanceFromRouteKm: 0,
+        },
+      ];
+    }
+  }
+
+  return selected.map(({ routeKm: _rk, ...poi }) => poi);
+}
 
 interface Route3DViewProps {
   trip?: Hike | null;
@@ -75,6 +359,12 @@ export const Route3DView: React.FC<Route3DViewProps> = ({
     isOrbiting: false,
     flyProgress: null,
   });
+
+  // Automatically discovered Peaks & POIs along the route in the 3D diorama
+  const [routePois, setRoutePois] = useState<DioramaPOI[]>([]);
+  const [isLoadingPois, setIsLoadingPois] = useState<boolean>(false);
+  const [showPois, setShowPois] = useState<boolean>(true);
+  const [highlightedPoiId, setHighlightedPoiId] = useState<string | null>(null);
 
   const [elevationData, setElevationData] = useState<{
     title: string;
@@ -293,6 +583,41 @@ export const Route3DView: React.FC<Route3DViewProps> = ({
     [onSelectSegment]
   );
 
+  // Automatically discover significant peaks and POIs along the route whenever selected route changes
+  useEffect(() => {
+    const coordsForPoi =
+      selectedCoords3D.length >= 2
+        ? selectedCoords3D
+        : routes3D.flatMap((r) => r.coordinates);
+
+    if (!activeRouteInfo || coordsForPoi.length < 2) {
+      setRoutePois([]);
+      setHighlightedPoiId(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    setIsLoadingPois(true);
+    setHighlightedPoiId(null);
+
+    fetchRoutePeaksAndPOIs(coordsForPoi, activeRouteInfo.name, controller.signal)
+      .then((found) => {
+        if (!controller.signal.aborted) {
+          setRoutePois(found);
+          setIsLoadingPois(false);
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setIsLoadingPois(false);
+        }
+      });
+
+    return () => {
+      controller.abort();
+    };
+  }, [activeRouteInfo, selectedCoords3D, routes3D]);
+
   const handleChartMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!elevationData || elevationData.points.length === 0) return;
 
@@ -404,6 +729,10 @@ export const Route3DView: React.FC<Route3DViewProps> = ({
           hasBottomPanel={Boolean(elevationData)}
           baseStyle={baseStyle}
           exaggeration={exaggeration}
+          pois={routePois}
+          showPois={showPois}
+          highlightedPoiId={highlightedPoiId}
+          onSelectPoi={(poi) => setHighlightedPoiId(poi.id)}
           onSelectRoute={handleSelectRouteOn3D}
           onFlightStateChange={setFlightState}
         />
@@ -431,6 +760,25 @@ export const Route3DView: React.FC<Route3DViewProps> = ({
             >
               <Mountain className="w-3.5 h-3.5 text-emerald-400" />
               <span>2D</span>
+            </button>
+
+            {/* Toggle 3D Peaks & POIs on Diorama */}
+            <button
+              type="button"
+              onClick={() => setShowPois((prev) => !prev)}
+              className={`px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1 shadow-2xs cursor-pointer border transition-all ${
+                showPois
+                  ? 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300'
+                  : 'bg-white hover:bg-slate-50 text-slate-500 border-slate-200'
+              }`}
+              title={
+                showPois
+                  ? 'Skrýt vrcholy a body zájmu v 3D diorámatu'
+                  : 'Zobrazit vrcholy a body zájmu v 3D diorámatu'
+              }
+            >
+              <Compass className="w-3.5 h-3.5" />
+              <span>Vrcholy ({routePois.length})</span>
             </button>
 
             {!activeRouteInfo.isPlanned && onOpenAnalytics && (
@@ -716,51 +1064,111 @@ export const Route3DView: React.FC<Route3DViewProps> = ({
                         })}
                       </svg>
 
-                      {hoveredPoint && (
-                        <>
-                          <div
-                            className="absolute top-0 bottom-0 w-px bg-slate-700/50 pointer-events-none"
-                            style={{ left: `${hoveredPoint.xPct}%` }}
-                          />
-                          <div
-                            className="absolute w-3.5 h-3.5 -ml-[7px] -mt-[7px] rounded-full border-2 border-white shadow-md pointer-events-none"
-                            style={{
-                              left: `${hoveredPoint.xPct}%`,
-                              top: `${hoveredPoint.yPct}%`,
-                              backgroundColor: SLOPE_COLORS[hoveredPoint.slopeCat],
-                            }}
-                          />
-                          <div
-                            className="absolute top-2 z-20 bg-slate-900/95 text-white px-2.5 py-1.5 rounded-lg shadow-lg text-[10px] pointer-events-none whitespace-nowrap space-y-0.5"
-                            style={{
-                              left:
-                                hoveredPoint.xPct > 65
-                                  ? `calc(${hoveredPoint.xPct}% - 150px)`
-                                  : `calc(${hoveredPoint.xPct}% + 10px)`,
-                            }}
-                          >
-                            <div className="font-semibold text-slate-300">
-                              Vzdálenost:{' '}
-                              <span className="text-white">{hoveredPoint.dist.toFixed(2)} km</span>
+                      {(() => {
+                        // Compute live chart point from mouse hover OR active 3D flyover
+                        let activePoint: {
+                          dist: number;
+                          ele: number;
+                          gradePct: number;
+                          slopeCat: 'flat' | 'std' | 'steep' | 'extreme';
+                          xPct: number;
+                          yPct: number;
+                          isFlyover?: boolean;
+                        } | null = hoveredPoint;
+
+                        if (
+                          !activePoint &&
+                          flightState.flyProgress &&
+                          pts.length > 1
+                        ) {
+                          const targetDist = flightState.flyProgress.distKm;
+                          let idx = 0;
+                          while (idx < pts.length - 2 && pts[idx + 1].dist < targetDist) {
+                            idx++;
+                          }
+                          const p1 = pts[idx];
+                          const p2 = pts[idx + 1] || p1;
+                          const segDist = p2.dist - p1.dist;
+                          const frac =
+                            segDist > 0
+                              ? Math.max(0, Math.min(1, (targetDist - p1.dist) / segDist))
+                              : 0;
+
+                          const interpDist = p1.dist + (p2.dist - p1.dist) * frac;
+                          const interpEle = Math.round(p1.rawEle + (p2.rawEle - p1.rawEle) * frac);
+                          const xPct =
+                            totalDist > 0 ? Math.max(0, Math.min(100, (interpDist / totalDist) * 100)) : 0;
+                          const yPct = 92 - ((interpEle - elevationData.minEle) / range) * 84;
+
+                          activePoint = {
+                            dist: interpDist,
+                            ele: interpEle,
+                            gradePct: p2.gradePct,
+                            slopeCat: p2.slopeCat,
+                            xPct,
+                            yPct,
+                            isFlyover: true,
+                          };
+                        }
+
+                        if (!activePoint) return null;
+
+                        return (
+                          <>
+                            <div
+                              className={`absolute top-0 bottom-0 pointer-events-none ${
+                                activePoint.isFlyover
+                                  ? 'w-0.5 bg-amber-500/80 shadow-[0_0_8px_#f59e0b]'
+                                  : 'w-px bg-slate-700/50'
+                              }`}
+                              style={{ left: `${activePoint.xPct}%` }}
+                            />
+                            <div
+                              className={`absolute w-3.5 h-3.5 -ml-[7px] -mt-[7px] rounded-full border-2 border-white pointer-events-none ${
+                                activePoint.isFlyover
+                                  ? 'shadow-[0_0_12px_#f59e0b] ring-2 ring-amber-400/70'
+                                  : 'shadow-md'
+                              }`}
+                              style={{
+                                left: `${activePoint.xPct}%`,
+                                top: `${activePoint.yPct}%`,
+                                backgroundColor: activePoint.isFlyover
+                                  ? '#f59e0b'
+                                  : SLOPE_COLORS[activePoint.slopeCat],
+                              }}
+                            />
+                            <div
+                              className="absolute top-2 z-20 bg-slate-900/95 text-white px-2.5 py-1.5 rounded-lg shadow-lg text-[10px] pointer-events-none whitespace-nowrap space-y-0.5"
+                              style={{
+                                left:
+                                  activePoint.xPct > 65
+                                    ? `calc(${activePoint.xPct}% - 150px)`
+                                    : `calc(${activePoint.xPct}% + 10px)`,
+                              }}
+                            >
+                              <div className="font-semibold text-slate-300">
+                                Vzdálenost:{' '}
+                                <span className="text-white">{activePoint.dist.toFixed(2)} km</span>
+                              </div>
+                              <div className="font-semibold text-emerald-400">
+                                Výška: <span className="text-white">{activePoint.ele} m n. m.</span>
+                              </div>
+                              <div className="font-semibold flex items-center gap-1.5">
+                                <span
+                                  className="w-2 h-2 rounded-full inline-block"
+                                  style={{ backgroundColor: SLOPE_COLORS[activePoint.slopeCat] }}
+                                />
+                                <span className="text-slate-300">Sklon:</span>
+                                <span className="text-white">
+                                  {activePoint.gradePct >= 0 ? '+' : ''}
+                                  {activePoint.gradePct.toFixed(1)} % (
+                                  {SLOPE_LABELS[activePoint.slopeCat]})
+                                </span>
+                              </div>
                             </div>
-                            <div className="font-semibold text-emerald-400">
-                              Výška: <span className="text-white">{hoveredPoint.ele} m n. m.</span>
-                            </div>
-                            <div className="font-semibold flex items-center gap-1.5">
-                              <span
-                                className="w-2 h-2 rounded-full inline-block"
-                                style={{ backgroundColor: SLOPE_COLORS[hoveredPoint.slopeCat] }}
-                              />
-                              <span className="text-slate-300">Sklon:</span>
-                              <span className="text-white">
-                                {hoveredPoint.gradePct >= 0 ? '+' : ''}
-                                {hoveredPoint.gradePct.toFixed(1)} % (
-                                {SLOPE_LABELS[hoveredPoint.slopeCat]})
-                              </span>
-                            </div>
-                          </div>
-                        </>
-                      )}
+                          </>
+                        );
+                      })()}
                     </div>
                   </div>
 
@@ -1064,6 +1472,91 @@ export const Route3DView: React.FC<Route3DViewProps> = ({
               </div>
             )}
           </div>
+
+          {/* Automatically Discovered Peaks & Points of Interest Section */}
+          <div className="p-3 rounded-xl border border-slate-200 bg-slate-50/70 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-wider text-slate-700">
+                <Compass className="w-3.5 h-3.5 text-amber-600" />
+                <span>Významné vrcholy a POI ({routePois.length})</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowPois((prev) => !prev)}
+                className={`px-2 py-0.5 rounded-md text-[10px] font-bold border cursor-pointer transition-colors ${
+                  showPois
+                    ? 'bg-emerald-600 text-white border-emerald-600'
+                    : 'bg-white text-slate-500 border-slate-300 hover:bg-slate-100'
+                }`}
+              >
+                {showPois ? 'Zobrazeno ve 3D' : 'Skryto'}
+              </button>
+            </div>
+
+            {isLoadingPois ? (
+              <div className="text-[11px] text-slate-500 py-2 flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
+                <span>Vyhledávám vrcholy a body zájmu podél trasy…</span>
+              </div>
+            ) : routePois.length === 0 ? (
+              <div className="text-[11px] text-slate-400 py-1">
+                V bezprostředním okolí trasy nebyly nalezeny žádné pojmenované body.
+              </div>
+            ) : (
+              <div className="space-y-1 max-h-48 overflow-y-auto pr-0.5">
+                {routePois.map((poi) => {
+                  const isSelected = highlightedPoiId === poi.id;
+                  const icon =
+                    poi.category === 'peak'
+                      ? '⛰️'
+                      : poi.category === 'viewpoint'
+                      ? '🔭'
+                      : poi.category === 'hut'
+                      ? '🏡'
+                      : poi.category === 'saddle'
+                      ? '🚩'
+                      : poi.category === 'historic'
+                      ? '🏰'
+                      : '💧';
+
+                  return (
+                    <button
+                      key={poi.id}
+                      type="button"
+                      onClick={() => {
+                        setShowPois(true);
+                        setHighlightedPoiId(isSelected ? null : poi.id);
+                        terrainMapRef.current?.focusLocation(poi.lat, poi.lon);
+                      }}
+                      className={`w-full text-left px-2.5 py-1.5 rounded-lg border text-[11px] flex items-center justify-between gap-2 transition-all cursor-pointer ${
+                        isSelected
+                          ? 'bg-amber-50 border-amber-400 ring-1 ring-amber-300 font-bold text-slate-900'
+                          : 'bg-white hover:bg-slate-100/80 border-slate-200/80 text-slate-700 font-medium'
+                      }`}
+                      title="Kliknutím zaměříte kameru na tento bod v 3D diorámatu"
+                    >
+                      <div className="flex items-center gap-1.5 truncate">
+                        <span>{icon}</span>
+                        <span className="truncate">{poi.name}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0 text-[10px]">
+                        {poi.ele && (
+                          <span className="font-extrabold text-amber-700 bg-amber-50 px-1.5 py-0.2 rounded border border-amber-200">
+                            {poi.ele} m
+                          </span>
+                        )}
+                        <span className="text-slate-400">
+                          {poi.distanceFromRouteKm < 0.1
+                            ? 'na trase'
+                            : `${poi.distanceFromRouteKm.toFixed(1)} km`}
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* 3. DOLNÍ OVLÁDACÍ PRVKY 3D (ve spodní části pravého panelu - obr. 3) */}
@@ -1079,7 +1572,10 @@ export const Route3DView: React.FC<Route3DViewProps> = ({
             {/* Vycentrovat 3D (swapped to top full-width & larger) */}
             <button
               type="button"
-              onClick={() => terrainMapRef.current?.focusRoute()}
+              onClick={() => {
+                setHighlightedPoiId(null);
+                terrainMapRef.current?.focusRoute();
+              }}
               className="col-span-2 bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 py-3 px-4 rounded-xl font-extrabold text-sm flex items-center justify-center gap-2 cursor-pointer transition-all shadow-sm"
               title="Vycentrovat trasu do 3D pohledu"
             >
@@ -1123,7 +1619,15 @@ export const Route3DView: React.FC<Route3DViewProps> = ({
               ) : (
                 <Play className="w-4 h-4 shrink-0" />
               )}
-              <span>{flightState.isFlying ? 'Zastavit přelet' : '3D přelet trasy'}</span>
+              <span>
+                {flightState.isFlying
+                  ? 'Zastavit přelet'
+                  : flightState.flyProgress &&
+                    flightState.flyProgress.pct > 0 &&
+                    flightState.flyProgress.pct < 100
+                  ? 'Pokračovat v přeletu'
+                  : '3D přelet trasy'}
+              </span>
             </button>
 
             {/* Naklopit / Shora */}

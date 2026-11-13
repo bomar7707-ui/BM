@@ -85,9 +85,11 @@ export const Navbar: React.FC<NavbarProps> = ({
               onClick={() => setActiveTab('map')}
               className="flex items-center gap-2.5 text-left group cursor-pointer"
             >
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center text-white shadow-md shadow-emerald-500/20 group-hover:scale-105 transition-transform">
-                <Compass className="w-5 h-5" />
-              </div>
+              <img
+                src="/logo.png?v=2"
+                alt="Horský zápisník logo"
+                className="w-11 h-11 rounded-full object-contain shadow-sm group-hover:scale-105 transition-transform shrink-0"
+              />
               <div>
                 <div className="font-extrabold text-stone-900 tracking-tight text-base sm:text-lg flex items-center gap-1.5">
                   Horský zápisník
@@ -307,9 +309,9 @@ export const Navbar: React.FC<NavbarProps> = ({
             {/* Version Label next to Export */}
             <span
               className="hidden md:inline-block text-[10px] font-medium text-stone-400 select-none ml-0.5"
-              title="Verze aplikace 2.0"
+              title="Verze aplikace 2.5"
             >
-              v2.0
+              v2.5
             </span>
 
             {/* Hidden File Inputs (shared between desktop and mobile) */}
