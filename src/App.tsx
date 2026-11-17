@@ -9,6 +9,7 @@ import { MilestonesView } from './components/MilestonesView';
 import { PrintReportView } from './components/PrintReportView';
 import { PlannedRoutesView, DISTINCT_ROUTE_COLORS } from './components/PlannedRoutesView';
 import { ParticipantsView } from './components/ParticipantsView';
+import { AccommodationView } from './components/AccommodationView';
 import { Toast, ToastType } from './components/Toast';
 import { ConfirmModal } from './components/ConfirmModal';
 import { Hike, FilterState, RoutePart, PlannedRoute, ParticipantProfile } from './types';
@@ -761,6 +762,15 @@ export default function App() {
                 hikes={hikes}
                 participantProfiles={participantProfiles}
                 onSaveProfile={handleSaveParticipantProfile}
+                onNotify={showToast}
+              />
+            )}
+
+            {/* TAB 7: Ubytování (Dog-friendly, 1-night tourist accommodation) */}
+            {activeTab === 'accommodation' && (
+              <AccommodationView
+                hikes={hikes}
+                plannedRoutes={plannedRoutes}
                 onNotify={showToast}
               />
             )}

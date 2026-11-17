@@ -1,6 +1,6 @@
-# Horský zápisník & Archív tras (Verze 1.2)
+# Horský zápisník & Archív tras (Verze 3.0)
 
-Jednotná webová aplikace pro evidenci horských výšlapů, interaktivní mapový archív GPX tras, plánovač tras, výškové profily s analýzou sklonu terénu, analytiku, horské milníky, správu účastníků s automatickým odesíláním milníků e-mailem a exporty (Excel, PDF, JSON, GPX).
+Jednotná webová aplikace pro evidenci horských výšlapů, interaktivní mapový archív GPX tras, plánovač tras, vyhledávač turistického ubytování se psem na 1 noc, výškové profily s analýzou sklonu terénu, analytiku, horské milníky, správu účastníků s automatickým odesíláním milníků e-mailem a exporty (Excel, PDF, JSON, GPX).
 
 > **„KDYŽ NEMÁŠ CESTU, NEMŮŽEŠ ZTRATIT CÍL“**
 
@@ -8,7 +8,13 @@ Jednotná webová aplikace pro evidenci horských výšlapů, interaktivní mapo
 
 ## Přehled verzí (Changelog)
 
-### Verze 1.2 (Aktuální)
+### Verze 3.0 (Aktuální)
+- **Nová sekce Ubytování (`AccommodationView` & `accommodationSearch.ts`):** Vyhledávání turistického ubytování se psem s možností pobytu na 1 noc (horské chaty a boudy, penziony, turistické ubytovny, hotely, kempy a autokempy s chatkami) na interaktivní mapě celé ČR i v okolí uložených a plánovaných tras ze Zápisníku.
+- **Spolehlivá živá data OpenStreetMap + Mapy.com:** Rychlý dotazovací engine přes QLever OSM Planet s prostorovým indexem, automatickým záložním Overpass `GET` fallbackem, debouncingem (550 ms), indikátory načítání a možností ručního zastavení (`AbortController`).
+- **Odkazy na rezervaci a ověření:** Přímé odkazy na Booking.com předvyplněné pro 1 noc a psa, Mapy.com i telefonní/webové kontakty.
+- **Označení verze v horní liště (`Navbar.tsx`):** Zobrazení verze `v3.0`.
+
+### Verze 1.2
 - **Označení verze v horní liště (`Navbar.tsx`):** Zobrazení aktuální verze (`v1.2`) přímo vedle tlačítka pro export.
 - **Úprava e-mailového oznámení o milníku (`milestoneCardGenerator.ts`):** České úvodní oznámení a přímý odkaz na veřejnou adresu aplikace `https://bomar7707-ui.github.io/BM/`.
 

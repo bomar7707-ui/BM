@@ -12,9 +12,9 @@ import {
   FileUp,
   Menu,
   X,
-  Compass,
   Trophy,
   Route,
+  BedDouble,
 } from 'lucide-react';
 import { HikerIcon } from './ParticipantsView';
 import { LOGO_DATA_URL } from '../assets/logoDataUrl';
@@ -25,6 +25,7 @@ export type ActiveTab =
   | 'route3d'
   | 'planned'
   | 'planned3d'
+  | 'accommodation'
   | 'analytics'
   | 'milestones'
   | 'participants'
@@ -72,6 +73,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'map' as ActiveTab, label: 'Mapa a trasy', icon: MapPin, desc: 'Interaktivní zobrazení' },
     { id: 'planned' as ActiveTab, label: 'Plánované trasy', icon: Route, desc: 'Plánování a GPX' },
     { id: 'journal' as ActiveTab, label: 'Zápisník', icon: BookOpen, desc: 'Zadávání a správa' },
+    { id: 'accommodation' as ActiveTab, label: 'Ubytování', icon: BedDouble, desc: 'Se psem na 1 noc' },
     { id: 'analytics' as ActiveTab, label: 'Analytika', icon: BarChart3, desc: 'Statistiky a rekordy' },
     { id: 'milestones' as ActiveTab, label: 'Milníky', icon: Trophy, desc: 'Výzvy a trofeje' },
   ];
@@ -81,7 +83,7 @@ export const Navbar: React.FC<NavbarProps> = ({
       <div className="max-w-7xl mx-auto px-3 sm:px-6">
         <div className="flex items-center justify-between h-16">
           {/* Brand */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 shrink-0">
             <button
               onClick={() => setActiveTab('map')}
               className="flex items-center gap-2.5 text-left group cursor-pointer"
@@ -92,10 +94,10 @@ export const Navbar: React.FC<NavbarProps> = ({
                 className="w-11 h-11 rounded-full object-contain shadow-sm group-hover:scale-105 transition-transform shrink-0"
               />
               <div>
-                <div className="font-extrabold text-stone-900 tracking-tight text-base sm:text-lg flex items-center gap-1.5">
+                <div className="font-extrabold text-stone-900 tracking-tight text-base sm:text-lg flex items-center gap-1.5 whitespace-nowrap">
                   Horský zápisník
                 </div>
-                <div className="text-[11px] text-stone-500 hidden sm:block">
+                <div className="text-[11px] text-stone-500 hidden xl:block whitespace-nowrap">
                   Archív turistických tras a výšlapů
                 </div>
               </div>
@@ -114,13 +116,13 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <button
                   key={item.id}
                   onClick={() => setActiveTab(item.id)}
-                  className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                  className={`flex items-center gap-1.5 px-2.5 lg:px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
                     isActive
                       ? 'bg-white text-emerald-700 shadow-xs border border-stone-200/80 font-bold'
                       : 'text-stone-600 hover:text-stone-900 hover:bg-white/60'
                   }`}
                 >
-                  <Icon className={`w-4 h-4 ${isActive ? 'text-emerald-600' : 'text-stone-400'}`} />
+                  <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-emerald-600' : 'text-stone-400'}`} />
                   <span>{item.label}</span>
                 </button>
               );
@@ -310,9 +312,9 @@ export const Navbar: React.FC<NavbarProps> = ({
             {/* Version Label next to Export */}
             <span
               className="hidden md:inline-block text-[10px] font-medium text-stone-400 select-none ml-0.5"
-              title="Verze aplikace 2.5.1"
+              title="Verze aplikace 3.0"
             >
-              v2.5.1
+              v3.0
             </span>
 
             {/* Hidden File Inputs (shared between desktop and mobile) */}
@@ -392,6 +394,21 @@ export const Navbar: React.FC<NavbarProps> = ({
 
               <button
                 onClick={() => {
+                  setActiveTab('accommodation');
+                  setMobileMenuOpen(false);
+                }}
+                className={`flex items-center gap-2 p-2.5 rounded-xl text-xs font-bold transition-all text-left ${
+                  activeTab === 'accommodation'
+                    ? 'bg-emerald-600 text-white shadow-sm'
+                    : 'bg-stone-50 text-stone-700 hover:bg-stone-100'
+                }`}
+              >
+                <BedDouble className="w-4 h-4" />
+                <span>Ubytování (se psem)</span>
+              </button>
+
+              <button
+                onClick={() => {
                   setActiveTab('print');
                   setMobileMenuOpen(false);
                 }}
@@ -410,14 +427,14 @@ export const Navbar: React.FC<NavbarProps> = ({
                   setActiveTab('participants');
                   setMobileMenuOpen(false);
                 }}
-                className={`flex items-center gap-2 p-2.5 rounded-xl text-xs font-bold transition-all text-left col-span-2 ${
+                className={`flex items-center gap-2 p-2.5 rounded-xl text-xs font-bold transition-all text-left ${
                   activeTab === 'participants'
                     ? 'bg-emerald-600 text-white shadow-sm'
                     : 'bg-stone-50 text-stone-700 hover:bg-stone-100'
                 }`}
               >
                 <HikerIcon className="w-4 h-4 text-emerald-600" />
-                <span>Účastníci (e-mailové notifikace milníků)</span>
+                <span>Účastníci (notifikace)</span>
               </button>
             </div>
 
