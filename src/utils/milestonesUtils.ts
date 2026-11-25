@@ -1,5 +1,10 @@
 import { Hike } from '../types';
-import { calculateDistanceKm, getSegmentDistanceKm } from './gpxParser';
+import {
+  calculateDistanceKm,
+  getSegmentDistanceKm,
+  isTransferStep,
+  getEffectiveHikeDistanceKm,
+} from './gpxParser';
 import { parseSafeDate, formatCzechDate, getDisplayDateRange } from './dateUtils';
 
 export interface DailySegmentMetric {
@@ -132,7 +137,7 @@ export function enrichHikesForMilestones(
       activeDates.push(normStart);
     }
 
-    let distKm = typeof trip.distance === 'string' ? parseFloat(trip.distance) : trip.distance;
+    let distKm = getEffectiveHikeDistanceKm(trip);
     if (isNaN(distKm)) distKm = 0;
 
     let ascentM = 0;
@@ -154,6 +159,7 @@ export function enrichHikesForMilestones(
           }
           if (i > 0) {
             const prev = m.coordinates[i - 1];
+            if (isTransferStep(prev, pt, false)) continue;
             calcDistKm += calculateDistanceKm(prev[0], prev[1], pt[0], pt[1]);
             const prevEle =
               prev.length >= 3 && typeof prev[2] === 'number' && !isNaN(prev[2]) ? prev[2] : null;

@@ -16,7 +16,8 @@ import {
   AlertCircle,
   Route,
 } from 'lucide-react';
-import { Hike, RoutePart } from '../types';
+import { Hike, HikeActivity, RoutePart } from '../types';
+import { ACTIVITY_OPTIONS, ActivitySvg } from './ActivityBadge';
 import {
   parseGpxXml,
   calculateCoordsDistanceKm,
@@ -32,6 +33,7 @@ interface HikeFormProps {
     dateTo?: string;
     participants?: string;
     note?: string;
+    activity?: HikeActivity;
     routes: RoutePart[];
   }) => Promise<void>;
   onCancelEdit: () => void;
@@ -47,6 +49,7 @@ export const HikeForm: React.FC<HikeFormProps> = ({
   const [dateTo, setDateTo] = useState('');
   const [participants, setParticipants] = useState('');
   const [note, setNote] = useState('');
+  const [activity, setActivity] = useState<HikeActivity | ''>('');
   const [routes, setRoutes] = useState<RoutePart[]>([
     {
       distance: '',
@@ -83,6 +86,7 @@ export const HikeForm: React.FC<HikeFormProps> = ({
       setDateTo(editingHike.dateTo || editingHike.endDate || '');
       setParticipants(editingHike.participants || '');
       setNote(editingHike.note || '');
+      setActivity(editingHike.activity || '');
 
       const initialRoutes = editingHike.routes || editingHike.maps || [];
       if (initialRoutes.length > 0) {
@@ -157,6 +161,7 @@ export const HikeForm: React.FC<HikeFormProps> = ({
     setDateTo('');
     setParticipants('');
     setNote('');
+    setActivity('');
     setRoutes([
       {
         distance: '',
@@ -289,6 +294,7 @@ export const HikeForm: React.FC<HikeFormProps> = ({
         dateTo: dateTo.trim() || undefined,
         participants: participants.trim() || undefined,
         note: note.trim() || undefined,
+        activity: activity || undefined,
         routes: normalizedRoutes,
       });
       if (!editingHike) {
@@ -409,8 +415,8 @@ export const HikeForm: React.FC<HikeFormProps> = ({
               />
             </div>
 
-            {/* Participants */}
-            <div className="sm:col-span-12">
+            {/* Participants & Optional Activity */}
+            <div className="sm:col-span-7">
               <label className="block text-xs font-bold uppercase tracking-wider text-stone-600 mb-1 flex items-center gap-1">
                 <Users className="w-3.5 h-3.5 text-stone-400" />
                 Účastníci <span className="text-stone-400 font-normal">(oddělujte čárkou nebo text)</span>
@@ -422,6 +428,52 @@ export const HikeForm: React.FC<HikeFormProps> = ({
                 placeholder="Např. Martin, Petr, se psem..."
                 className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-300 rounded-xl focus:bg-white focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none text-sm transition-all text-stone-900"
               />
+            </div>
+
+            {/* Optional Activity Selector (Turistika, Běh, Kolo) */}
+            <div className="sm:col-span-5">
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-bold uppercase tracking-wider text-stone-600">
+                  Aktivita <span className="text-stone-400 font-normal">(volitelné)</span>
+                </label>
+                {activity && (
+                  <button
+                    type="button"
+                    onClick={() => setActivity('')}
+                    className="text-[11px] font-semibold text-stone-400 hover:text-rose-600 transition-colors cursor-pointer"
+                  >
+                    Zrušit výběr
+                  </button>
+                )}
+              </div>
+              <div className="grid grid-cols-3 gap-1.5">
+                {ACTIVITY_OPTIONS.map((opt) => {
+                  const isActive = activity === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setActivity((prev) => (prev === opt.id ? '' : opt.id))}
+                      className={`py-2 px-2 rounded-xl border text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                        isActive
+                          ? opt.activeBgClass
+                          : 'bg-stone-50 hover:bg-stone-100 text-stone-700 border-stone-300'
+                      }`}
+                      title={
+                        isActive
+                          ? `Zrušit aktivitu ${opt.label}`
+                          : `Zvolit aktivitu: ${opt.label}`
+                      }
+                    >
+                      <ActivitySvg
+                        activity={opt.id}
+                        className={`w-4 h-4 shrink-0 ${isActive ? 'text-white' : opt.colorClass}`}
+                      />
+                      <span>{opt.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             {/* Multi-Section Routes Container */}

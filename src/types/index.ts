@@ -16,6 +16,8 @@ export interface RoutePart {
   url?: string;
 }
 
+export type HikeActivity = 'hiking' | 'running' | 'cycling';
+
 export interface Hike {
   id: string;
   name: string;
@@ -26,6 +28,7 @@ export interface Hike {
   endDate?: string;
   participants?: string;
   note?: string;
+  activity?: HikeActivity;
   routes?: RoutePart[];
   maps?: RoutePart[];
   gpx?: string; // legacy single GPX field
@@ -35,6 +38,7 @@ export interface FilterState {
   year: string;
   month: string;
   participant: string;
+  activity?: string;
   tripId?: string;
 }
 

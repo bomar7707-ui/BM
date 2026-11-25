@@ -1,6 +1,6 @@
-# Horský zápisník & Archív tras (Verze 3.0)
+# Horský zápisník & Archív tras (Verze 4.0)
 
-Jednotná webová aplikace pro evidenci horských výšlapů, interaktivní mapový archív GPX tras, plánovač tras, vyhledávač turistického ubytování se psem na 1 noc, výškové profily s analýzou sklonu terénu, analytiku, horské milníky, správu účastníků s automatickým odesíláním milníků e-mailem a exporty (Excel, PDF, JSON, GPX).
+Jednotná webová aplikace pro evidenci horských výšlapů, interaktivní 2D a 3D mapový archív GPX tras, plánovač tras, vyhledávač zázemí na trase (ubytování, jídlo a pití vč. lesních barů, parkování), výškové profily s analýzou sklonu terénu a detekcí přejezdů, analytiku, horské milníky, správu účastníků s automatickým odesíláním milníků e-mailem a exporty (Excel, PDF, JSON, GPX).
 
 > **„KDYŽ NEMÁŠ CESTU, NEMŮŽEŠ ZTRATIT CÍL“**
 
@@ -8,7 +8,16 @@ Jednotná webová aplikace pro evidenci horských výšlapů, interaktivní mapo
 
 ## Přehled verzí (Changelog)
 
-### Verze 3.0 (Aktuální)
+### Verze 4.0 (Aktuální)
+- **Celoobrazovková úvodní načítací obrazovka:** Zobrazení loga Horský zápisník přes celou obrazovku při spuštění aplikace až do kompletního načtení tras a podkladové mapy.
+- **Výběr a filtrování podle aktivity (`Turistika`, `Běh`, `Kolo`):** Volitelné přiřazení aktivity u každé trasy v Zápisníku, zobrazení ikonky aktivity vedle názvu trasy v Načtených trasách i v historii a filtrování podle aktivity ve všech sekcích (Mapa, Zápisník, Analytika, Milníky, Tisk a PDF).
+- **3D zobrazení tras (`Route3DView`) s ovládáním vrcholů:** Interaktivní 3D terén a přelet nad trasou s možností jednotlivě zapnout/vypnout zobrazení bodů zájmu (vrcholů) ve všech 3D pohledech.
+- **Detekce přejezdů ve výškovém profilu:** Automatické rozpoznání nenavazujících úseků trasy, jejich vykreslení černou barvou s označením *Přejezd* ve výškovém profilu a vyloučení přejezdů z kilometrových a výškových statistik.
+- **Zázemí na trase (`AccommodationView`):** Rozšířené vyhledávání ubytování (s volitelným filtrem pro psa), jídla a pití (včetně samoobslužných **lesních barů**) a parkování s možností rychlého resetování vyhledávání.
+- **Kompletní optimalizace pro mobilní zobrazení:** Kompaktní ovládací prvky mapy (ikonové nastavení mapy, vycentrování na všechny trasy a přehled), zmenšený výškový profil na mobilu a automatické zavírání 3D ovládacího panelu při spuštění přeletu.
+- **Označení verze v horní liště (`Navbar.tsx`):** Zobrazení verze `v4.0`.
+
+### Verze 3.0
 - **Nová sekce Ubytování (`AccommodationView` & `accommodationSearch.ts`):** Vyhledávání turistického ubytování se psem s možností pobytu na 1 noc (horské chaty a boudy, penziony, turistické ubytovny, hotely, kempy a autokempy s chatkami) na interaktivní mapě celé ČR i v okolí uložených a plánovaných tras ze Zápisníku.
 - **Spolehlivá živá data OpenStreetMap + Mapy.com:** Rychlý dotazovací engine přes QLever OSM Planet s prostorovým indexem, automatickým záložním Overpass `GET` fallbackem, debouncingem (550 ms), indikátory načítání a možností ručního zastavení (`AbortController`).
 - **Odkazy na rezervaci a ověření:** Přímé odkazy na Booking.com předvyplněné pro 1 noc a psa, Mapy.com i telefonní/webové kontakty.

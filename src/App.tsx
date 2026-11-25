@@ -12,7 +12,7 @@ import { ParticipantsView } from './components/ParticipantsView';
 import { AccommodationView } from './components/AccommodationView';
 import { Toast, ToastType } from './components/Toast';
 import { ConfirmModal } from './components/ConfirmModal';
-import { Hike, FilterState, RoutePart, PlannedRoute, ParticipantProfile } from './types';
+import { Hike, HikeActivity, FilterState, RoutePart, PlannedRoute, ParticipantProfile } from './types';
 import {
   subscribeToHikesLive,
   fetchAllHikes,
@@ -32,7 +32,11 @@ import {
   saveParticipantProfile,
 } from './services/firebase';
 import { exportHikesToExcel } from './utils/excelExport';
-import { calculateDistanceKm, parseGpxXml } from './utils/gpxParser';
+import {
+  parseGpxXml,
+  calculateCoordsDistanceKm,
+  getEffectiveHikeDistanceKm,
+} from './utils/gpxParser';
 import { evaluateMilestonesForParticipant } from './utils/milestonesUtils';
 import { sendMilestoneEmailNotification, downloadMilestoneCardPng } from './utils/milestoneCardGenerator';
 
@@ -49,6 +53,10 @@ export default function App() {
   });
 
   const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [isInitialDataLoaded, setIsInitialDataLoaded] = useState<boolean>(false);
+  const [isMapReady, setIsMapReady] = useState<boolean>(false);
+  const [minSplashElapsed, setMinSplashElapsed] = useState<boolean>(false);
+  const [splashRemoved, setSplashRemoved] = useState<boolean>(false);
   const [editingHike, setEditingHike] = useState<Hike | null>(null);
   const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
   const [selectedMapIndex, setSelectedMapIndex] = useState<number | null>(null);
@@ -69,6 +77,7 @@ export default function App() {
     year: 'all',
     month: 'all',
     participant: 'all',
+    activity: 'all',
   });
 
   // Toast
@@ -102,17 +111,51 @@ export default function App() {
       (data) => {
         setHikes(data);
         setIsConnected(true);
+        setIsInitialDataLoaded(true);
       },
       (err) => {
         console.warn('Firebase error:', err);
         setIsConnected(false);
+        setIsInitialDataLoaded(true);
       }
     );
 
+    const dataFallbackTimer = window.setTimeout(() => {
+      setIsInitialDataLoaded(true);
+    }, 2200);
+
     return () => {
+      window.clearTimeout(dataFallbackTimer);
       unsubscribe();
     };
   }, []);
+
+  // Minimum splash display duration & fallback safety timer
+  useEffect(() => {
+    const minTimer = window.setTimeout(() => {
+      setMinSplashElapsed(true);
+    }, 1100);
+    const maxSafetyTimer = window.setTimeout(() => {
+      setIsInitialDataLoaded(true);
+      setIsMapReady(true);
+      setMinSplashElapsed(true);
+    }, 3500);
+    return () => {
+      window.clearTimeout(minTimer);
+      window.clearTimeout(maxSafetyTimer);
+    };
+  }, []);
+
+  const isAppAndMapLoaded =
+    minSplashElapsed && isInitialDataLoaded && (isMapReady || activeTab !== 'map');
+
+  useEffect(() => {
+    if (!isAppAndMapLoaded) return;
+    const fadeTimer = window.setTimeout(() => {
+      setSplashRemoved(true);
+    }, 550);
+    return () => window.clearTimeout(fadeTimer);
+  }, [isAppAndMapLoaded]);
 
   // Subscribe to Planned Routes Live Snapshot
   useEffect(() => {
@@ -134,10 +177,10 @@ export default function App() {
     };
   }, []);
 
-  // Total stats
+  // Total stats (excluding non-contiguous transfers / přejezdy)
   const { totalDistance, totalTrips } = useMemo(() => {
     const totalKm = hikes.reduce((sum, h) => {
-      const d = typeof h.distance === 'string' ? parseFloat(h.distance) : h.distance;
+      const d = getEffectiveHikeDistanceKm(h);
       return sum + (isNaN(d) ? 0 : d);
     }, 0);
     return {
@@ -218,6 +261,7 @@ export default function App() {
     dateTo?: string;
     participants?: string;
     note?: string;
+    activity?: HikeActivity;
     routes: RoutePart[];
   }) => {
     const previousHikes = [...hikes];
@@ -233,6 +277,7 @@ export default function App() {
         dateTo: hikeData.dateTo || '',
         participants: hikeData.participants || '',
         note: hikeData.note || '',
+        activity: hikeData.activity,
         routes: hikeData.routes,
         maps: hikeData.routes,
       };
@@ -253,6 +298,7 @@ export default function App() {
         dateTo: hikeData.dateTo || '',
         participants: hikeData.participants || '',
         note: hikeData.note || '',
+        activity: hikeData.activity,
         routes: hikeData.routes,
         maps: hikeData.routes,
       };
@@ -441,10 +487,7 @@ export default function App() {
         return;
       }
 
-      let distKm = 0;
-      for (let i = 1; i < coords.length; i++) {
-        distKm += calculateDistanceKm(coords[i - 1][0], coords[i - 1][1], coords[i][0], coords[i][1]);
-      }
+      const distKm = calculateCoordsDistanceKm(coords);
 
       let trackName = file.name.replace(/\.gpx$/i, '');
       const todayIso = new Date().toISOString().slice(0, 10);
@@ -513,6 +556,7 @@ export default function App() {
       dateTo: h.dateTo || '',
       participants: h.participants || '',
       note: h.note || '',
+      activity: h.activity || '',
       routes: (h.routes || h.maps || []).map((r) => ({
         distance: r.distance !== undefined && r.distance !== '' ? parseFloat(String(r.distance)) || 0 : 0,
         link: r.link || r.url || '',
@@ -587,6 +631,29 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-stone-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-white">
+      {/* Full-Screen Logo Loading Screen on App Startup & Before Map Loads */}
+      {!splashRemoved && (
+        <div
+          className={`fixed inset-0 z-[9999] bg-[#fbfaf5] flex flex-col items-center justify-center select-none overflow-hidden transition-opacity duration-500 ${
+            isAppAndMapLoaded ? 'opacity-0 pointer-events-none' : 'opacity-100'
+          }`}
+          aria-label="Načítání aplikace Horský zápisník"
+        >
+          <div className="w-[min(94vw,86vh)] h-[min(94vw,86vh)] flex items-center justify-center overflow-hidden">
+            <img
+              src={`${import.meta.env.BASE_URL}assets/aistudio/Gemini_Generated_Image_sdhf1zsdhf1zsdhf_fd6937b9.jpg`}
+              alt="Horský zápisník logo"
+              className="w-full h-full object-cover scale-[1.06] mix-blend-multiply animate-pulse"
+              style={{ animationDuration: '2.8s' }}
+            />
+          </div>
+          <div className="absolute bottom-6 sm:bottom-8 flex items-center gap-2.5 px-4 py-1.5 rounded-full bg-stone-900/5 border border-stone-900/10 text-stone-700 text-xs sm:text-sm font-bold tracking-wide">
+            <span className="w-2 h-2 rounded-full bg-emerald-600 animate-ping" />
+            <span>Načítání mapy a tras…</span>
+          </div>
+        </div>
+      )}
+
       {/* Toast Notification */}
       <Toast
         message={toast.message}
@@ -681,6 +748,7 @@ export default function App() {
                 onOpen3D={() => setActiveTab('route3d')}
                 onOpenPrint={() => setActiveTab('print')}
                 onRefreshCloud={handleRefreshCloud}
+                onMapReady={() => setIsMapReady(true)}
               />
             )}
 

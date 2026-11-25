@@ -1,6 +1,7 @@
 import { jsPDF } from 'jspdf';
 import { Coordinate, Hike, FilterState } from '../types';
 import { getDisplayDateRange } from './dateUtils';
+import { isTransferStep, getEffectiveHikeDistanceKm } from './gpxParser';
 import {
   MilestoneStatus,
   enrichHikesForMilestones,
@@ -28,7 +29,8 @@ export function drawShapeToRect(
   ry: number,
   rw: number,
   rh: number,
-  coords: Coordinate[]
+  coords: Coordinate[],
+  segmentBoundaryIndices?: Set<number>
 ) {
   if (!coords || coords.length === 0) return;
 
@@ -73,8 +75,12 @@ export function drawShapeToRect(
   coords.forEach((p, i) => {
     const x = gX(p[1]);
     const y = gY(p[0]);
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
+    const isSegmentBoundary = Boolean(segmentBoundaryIndices?.has(i));
+    if (i === 0 || (isSegmentBoundary && isTransferStep(coords[i - 1], p, true))) {
+      ctx.moveTo(x, y);
+    } else {
+      ctx.lineTo(x, y);
+    }
   });
   ctx.stroke();
 
@@ -107,7 +113,8 @@ export function drawProfileToRect(
   rh: number,
   coords: Coordinate[],
   minE: number,
-  maxE: number
+  maxE: number,
+  segmentBoundaryIndices?: Set<number>
 ) {
   if (!coords || coords.length < 2) return;
 
@@ -139,18 +146,53 @@ export function drawProfileToRect(
   ctx.fillStyle = grad;
   ctx.fill();
 
-  // Stroke line
-  ctx.beginPath();
-  ctx.strokeStyle = '#059669';
-  ctx.lineWidth = 2.5;
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  coords.forEach((p, i) => {
-    const ele = typeof p[2] === 'number' && !isNaN(p[2]) ? p[2] : minE;
-    if (i === 0) ctx.moveTo(gX(i), gY(ele));
-    else ctx.lineTo(gX(i), gY(ele));
+  // Draw normal segments in emerald and non-contiguous Přejezdy between segments in black (#111827) with label "Přejezd"
+  const transferIndices: number[] = [];
+  for (let i = 1; i < coords.length; i++) {
+    const prev = coords[i - 1];
+    const curr = coords[i];
+    const ele1 = typeof prev[2] === 'number' && !isNaN(prev[2]) ? prev[2] : minE;
+    const ele2 = typeof curr[2] === 'number' && !isNaN(curr[2]) ? curr[2] : minE;
+    const isSegmentBoundary = Boolean(segmentBoundaryIndices?.has(i));
+    const isTr = isSegmentBoundary && isTransferStep(prev, curr, true);
+
+    if (isTr) {
+      transferIndices.push(i);
+      ctx.beginPath();
+      ctx.moveTo(gX(i - 1), ry + padTop + plotH);
+      ctx.lineTo(gX(i - 1), gY(ele1));
+      ctx.lineTo(gX(i), gY(ele2));
+      ctx.lineTo(gX(i), ry + padTop + plotH);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(17, 24, 39, 0.25)';
+      ctx.fill();
+    }
+
+    ctx.beginPath();
+    ctx.strokeStyle = isTr ? '#111827' : '#059669';
+    ctx.lineWidth = isTr ? 3 : 2.5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.moveTo(gX(i - 1), gY(ele1));
+    ctx.lineTo(gX(i), gY(ele2));
+    ctx.stroke();
+  }
+
+  // Label each Přejezd
+  transferIndices.forEach((idx) => {
+    const prev = coords[idx - 1];
+    const curr = coords[idx];
+    const ele1 = typeof prev[2] === 'number' && !isNaN(prev[2]) ? prev[2] : minE;
+    const ele2 = typeof curr[2] === 'number' && !isNaN(curr[2]) ? curr[2] : minE;
+    const midX = (gX(idx - 1) + gX(idx)) / 2;
+    const midY = (gY(ele1) + gY(ele2)) / 2;
+
+    ctx.fillStyle = '#111827';
+    ctx.font = 'bold 10px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Přejezd', midX, Math.max(ry + padTop + 10, midY - 6));
+    ctx.textAlign = 'left';
   });
-  ctx.stroke();
 
   // Max and min labels
   ctx.fillStyle = '#475569';
@@ -220,6 +262,12 @@ function drawRoundedRect(
   ctx.closePath();
 }
 
+const ACTIVITY_LABELS: Record<string, string> = {
+  hiking: 'Turistika',
+  running: 'Běh',
+  cycling: 'Kolo',
+};
+
 export function formatFilterSummary(filterState: FilterState): string {
   const parts: string[] = [];
   parts.push(`Rok: ${filterState.year === 'all' ? 'Všechny' : filterState.year}`);
@@ -232,6 +280,13 @@ export function formatFilterSummary(filterState: FilterState): string {
   );
   parts.push(
     `Účastník: ${filterState.participant === 'all' ? 'Všichni' : filterState.participant}`
+  );
+  parts.push(
+    `Aktivita: ${
+      !filterState.activity || filterState.activity === 'all'
+        ? 'Všechny'
+        : ACTIVITY_LABELS[filterState.activity] || filterState.activity
+    }`
   );
   return parts.join('  •  ');
 }
@@ -542,7 +597,7 @@ export function exportFilteredHikesToPdf(
     // Distance & participants row
     ctx.fillStyle = '#047857';
     ctx.font = 'bold 18px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-    const distText = `Vzdálenost: ${hike.distance} km`;
+    const distText = `Vzdálenost: ${getEffectiveHikeDistanceKm(hike)} km`;
     ctx.fillText(distText, MARGIN_X + 26, cursorY + 84);
 
     if (hike.participants) {
@@ -552,11 +607,30 @@ export function exportFilteredHikesToPdf(
       ctx.fillText(partText.slice(0, 75), MARGIN_X + 250, cursorY + 84);
     }
 
-    // Extract coordinates
+    // Extract coordinates and track boundaries between separate RouteParts (úseky)
     const routes = hike.routes || hike.maps || [];
     let allCoords: Coordinate[] = [];
+    const shapeBoundaries = new Set<number>();
+    const ptsWithEle: Coordinate[] = [];
+    const profileBoundaries = new Set<number>();
+
     routes.forEach((m) => {
-      if (m.coordinates) allCoords = allCoords.concat(m.coordinates);
+      if (m.coordinates && m.coordinates.length > 0) {
+        if (allCoords.length > 0) {
+          shapeBoundaries.add(allCoords.length);
+        }
+        allCoords = allCoords.concat(m.coordinates);
+
+        const segEle = m.coordinates.filter(
+          (p) => p.length >= 3 && typeof p[2] === 'number' && !isNaN(p[2])
+        );
+        if (segEle.length > 0) {
+          if (ptsWithEle.length > 0) {
+            profileBoundaries.add(ptsWithEle.length);
+          }
+          ptsWithEle.push(...segEle);
+        }
+      }
     });
 
     // Left box: Tvar trasy
@@ -581,7 +655,7 @@ export function exportFilteredHikesToPdf(
     ctx.fillText('TVAR TRASY', box1X + box1W / 2, boxY + 22);
 
     if (allCoords.length > 0) {
-      drawShapeToRect(ctx, box1X + 10, boxY + 28, box1W - 20, boxH - 34, allCoords);
+      drawShapeToRect(ctx, box1X + 10, boxY + 28, box1W - 20, boxH - 34, allCoords, shapeBoundaries);
     } else {
       ctx.fillStyle = '#94a3b8';
       ctx.font = 'italic 16px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
@@ -601,9 +675,6 @@ export function exportFilteredHikesToPdf(
     ctx.fillText('VÝŠKOVÝ PROFIL', box2X + box2W / 2, boxY + 22);
     ctx.textAlign = 'left';
 
-    const ptsWithEle = allCoords.filter(
-      (p) => p.length >= 3 && typeof p[2] === 'number' && !isNaN(p[2])
-    );
     if (ptsWithEle.length > 1) {
       let minE = Infinity;
       let maxE = -Infinity;
@@ -612,7 +683,17 @@ export function exportFilteredHikesToPdf(
         if (ele < minE) minE = ele;
         if (ele > maxE) maxE = ele;
       });
-      drawProfileToRect(ctx, box2X + 10, boxY + 28, box2W - 20, boxH - 34, ptsWithEle, minE, maxE);
+      drawProfileToRect(
+        ctx,
+        box2X + 10,
+        boxY + 28,
+        box2W - 20,
+        boxH - 34,
+        ptsWithEle,
+        minE,
+        maxE,
+        profileBoundaries
+      );
     } else {
       ctx.fillStyle = '#94a3b8';
       ctx.font = 'italic 16px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';

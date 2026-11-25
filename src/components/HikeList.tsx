@@ -15,8 +15,9 @@ import {
   Search,
 } from 'lucide-react';
 import { Hike, FilterState } from '../types';
+import { ActivityIcon, ACTIVITY_OPTIONS } from './ActivityBadge';
 import { parseSafeDate, getDisplayDateRange } from '../utils/dateUtils';
-import { getSegmentDistanceKm } from '../utils/gpxParser';
+import { getSegmentDistanceKm, getEffectiveHikeDistanceKm } from '../utils/gpxParser';
 
 interface HikeListProps {
   hikes: Hike[];
@@ -83,6 +84,10 @@ export const HikeList: React.FC<HikeListProps> = ({
           }
         }
 
+        if (filterState.activity && filterState.activity !== 'all') {
+          if (h.activity !== filterState.activity) return false;
+        }
+
         if (searchQuery.trim()) {
           const q = searchQuery.toLowerCase();
           const matchName = h.name.toLowerCase().includes(q);
@@ -104,7 +109,7 @@ export const HikeList: React.FC<HikeListProps> = ({
 
   const filteredDistance = useMemo(() => {
     return filteredHikes.reduce((sum, h) => {
-      const d = typeof h.distance === 'string' ? parseFloat(h.distance) : h.distance;
+      const d = getEffectiveHikeDistanceKm(h);
       return sum + (isNaN(d) ? 0 : d);
     }, 0);
   }, [filteredHikes]);
@@ -152,7 +157,7 @@ export const HikeList: React.FC<HikeListProps> = ({
         </div>
 
         {/* Filter inputs */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-1">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 pt-1">
           {/* Search box */}
           <div className="relative">
             <Search className="w-4 h-4 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -219,6 +224,22 @@ export const HikeList: React.FC<HikeListProps> = ({
               ))}
             </select>
           </div>
+
+          {/* Activity */}
+          <div>
+            <select
+              value={filterState.activity || 'all'}
+              onChange={(e) => onFilterChange({ activity: e.target.value })}
+              className="w-full px-3 py-2 bg-stone-50 border border-stone-200 rounded-xl focus:bg-white focus:ring-1 focus:ring-emerald-500 outline-none text-xs text-stone-800 font-medium"
+            >
+              <option value="all">Všechny aktivity</option>
+              {ACTIVITY_OPTIONS.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       </div>
 
@@ -246,6 +267,7 @@ export const HikeList: React.FC<HikeListProps> = ({
                 <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
                   <div className="space-y-1.5 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
+                      <ActivityIcon activity={hike.activity} showLabel />
                       <h4
                         onClick={() => onEdit(hike)}
                         className="text-base sm:text-lg font-bold text-stone-900 hover:text-emerald-700 cursor-pointer transition-colors"

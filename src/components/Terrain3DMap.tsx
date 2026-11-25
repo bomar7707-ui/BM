@@ -10,6 +10,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Coordinate } from '../types';
 import { calculateDistanceKm } from '../utils/gpxParser';
+import { renderCustomMapTileToCanvas } from '../utils/customMapLayer';
+import { getMapaSettingsSignature, useMapaSettings } from '../utils/mapSettings';
 
 export interface Route3DItem {
   id: string;
@@ -22,8 +24,6 @@ export interface Route3DItem {
   isSelected: boolean;
   coordinates: Coordinate[];
 }
-
-export type BaseMapStyle3D = 'outdoor' | 'satellite' | 'topo';
 
 export type DioramaPOICategory =
   | 'peak'
@@ -66,7 +66,6 @@ interface Terrain3DMapProps {
   selectedCoords: Coordinate[];
   hoveredCoord?: [number, number] | null;
   hasBottomPanel?: boolean;
-  baseStyle: BaseMapStyle3D;
   exaggeration: number;
   pois?: DioramaPOI[];
   showPois?: boolean;
@@ -75,8 +74,6 @@ interface Terrain3DMapProps {
   onSelectRoute?: (tripId: string, mapIndex: number) => void;
   onFlightStateChange?: (state: FlightTelemetryState) => void;
 }
-
-const MAPY_CZ_API_KEY = '3SfstVBaZryBHeEkOsw_DSAc8PwcV140TQvNslWDrQY';
 
 // Grid resolution of the 3D diorama top surface
 const GRID_SEGMENTS = 144;
@@ -134,16 +131,6 @@ function loadImage(url: string): Promise<HTMLImageElement | null> {
     img.onerror = () => resolve(null);
     img.src = url;
   });
-}
-
-function getTileUrl(style: BaseMapStyle3D, z: number, x: number, y: number): string {
-  if (style === 'satellite') {
-    return `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
-  }
-  if (style === 'topo') {
-    return `https://a.tile.opentopomap.org/${z}/${x}/${y}.png`;
-  }
-  return `https://api.mapy.cz/v1/maptiles/outdoor/256/${z}/${x}/${y}?apikey=${MAPY_CZ_API_KEY}`;
 }
 
 // Compute padded geographic bounding box for the diorama block
@@ -235,10 +222,9 @@ function pickOptimalZoom(bounds: DioramaBounds, maxAllowedZoom = 14): number {
   return 11;
 }
 
-// Fetch and composite cropped raster map canvas for the diorama bounds
+// Render and composite cropped custom Mapa ("Fyzický atlas") canvas for the diorama bounds
 async function fetchDioramaMapCanvas(
-  bounds: DioramaBounds,
-  style: BaseMapStyle3D
+  bounds: DioramaBounds
 ): Promise<HTMLCanvasElement> {
   const z = pickOptimalZoom(bounds, 14);
   const exactX0 = lonToTileX(bounds.minLon, z);
@@ -259,22 +245,24 @@ async function fetchDioramaMapCanvas(
   stitchCanvas.height = rows * 256;
   const sCtx = stitchCanvas.getContext('2d')!;
 
-  // Fallback subtle topographic background in case a tile is slow
-  sCtx.fillStyle = '#dce7dc';
+  sCtx.fillStyle = '#F3F2E9';
   sCtx.fillRect(0, 0, stitchCanvas.width, stitchCanvas.height);
 
   const tasks: Promise<void>[] = [];
   for (let ty = minTileY; ty <= maxTileY; ty++) {
     for (let tx = minTileX; tx <= maxTileX; tx++) {
-      const url = getTileUrl(style, z, tx, ty);
       const dx = (tx - minTileX) * 256;
       const dy = (ty - minTileY) * 256;
       tasks.push(
-        loadImage(url).then((img) => {
-          if (img) {
-            sCtx.drawImage(img, dx, dy, 256, 256);
-          }
-        })
+        (async () => {
+          const tileCanvas = document.createElement('canvas');
+          tileCanvas.width = 512;
+          tileCanvas.height = 512;
+          await renderCustomMapTileToCanvas(z, tx, ty, tileCanvas);
+          sCtx.drawImage(tileCanvas, 0, 0, 512, 512, dx, dy, 256, 256);
+          tileCanvas.width = 0;
+          tileCanvas.height = 0;
+        })()
       );
     }
   }
@@ -601,7 +589,6 @@ export const Terrain3DMap = forwardRef<Terrain3DMapHandle, Terrain3DMapProps>(
       selectedCoords,
       hoveredCoord,
       hasBottomPanel = false,
-      baseStyle,
       exaggeration,
       pois = [],
       showPois = true,
@@ -1363,7 +1350,7 @@ export const Terrain3DMap = forwardRef<Terrain3DMapHandle, Terrain3DMapProps>(
 
         const [demResult, mapCanvas] = await Promise.all([
           fetchDioramaElevationGrid(bounds, allCoords),
-          fetchDioramaMapCanvas(bounds, baseStyle),
+          fetchDioramaMapCanvas(bounds),
         ]);
 
         if (cancelled) return;
@@ -1509,30 +1496,6 @@ export const Terrain3DMap = forwardRef<Terrain3DMapHandle, Terrain3DMapProps>(
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [routeSignature]);
 
-    // Update ONLY the draped map texture when baseStyle changes (instant, keeps camera & geometry intact)
-    useEffect(() => {
-      let cancelled = false;
-      const data = dioramaDataRef.current;
-      if (!data || !terrainMeshRef.current || !rendererRef.current) return;
-
-      fetchDioramaMapCanvas(data.bounds, baseStyle).then((canvas) => {
-        if (cancelled || !terrainMeshRef.current || !rendererRef.current) return;
-        const tex = new THREE.CanvasTexture(canvas);
-        tex.colorSpace = THREE.SRGBColorSpace;
-        tex.anisotropy = rendererRef.current.capabilities.getMaxAnisotropy();
-
-        const mat = terrainMeshRef.current.material as THREE.MeshStandardMaterial;
-        const oldTex = mat.map;
-        mat.map = tex;
-        mat.needsUpdate = true;
-        oldTex?.dispose();
-      });
-
-      return () => {
-        cancelled = true;
-      };
-    }, [baseStyle]);
-
     // Update terrain vertical exaggeration in real-time when user clicks 1x / 1.4x / 2x
     useEffect(() => {
       const data = dioramaDataRef.current;
@@ -1563,6 +1526,40 @@ export const Terrain3DMap = forwardRef<Terrain3DMapHandle, Terrain3DMapProps>(
 
       rebuildRoutesAndAnchors();
     }, [exaggeration, rebuildRoutesAndAnchors]);
+
+    const mapaSettings = useMapaSettings();
+    const mapaSettingsSig = getMapaSettingsSignature(mapaSettings);
+    const prevMapaSigRef = useRef(mapaSettingsSig);
+
+    // Hot-swap 3D diorama map texture in real-time when user changes Mapa v1.3 style or layers
+    useEffect(() => {
+      if (prevMapaSigRef.current === mapaSettingsSig) return;
+      prevMapaSigRef.current = mapaSettingsSig;
+
+      const data = dioramaDataRef.current;
+      const terrainMesh = terrainMeshRef.current;
+      const renderer = rendererRef.current;
+      if (!data || !terrainMesh || !renderer) return;
+
+      let cancelled = false;
+      fetchDioramaMapCanvas(data.bounds).then((mapCanvas) => {
+        if (cancelled) return;
+        const nextTex = new THREE.CanvasTexture(mapCanvas);
+        nextTex.colorSpace = THREE.SRGBColorSpace;
+        nextTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+        nextTex.minFilter = THREE.LinearMipmapLinearFilter;
+        nextTex.magFilter = THREE.LinearFilter;
+
+        const mat = terrainMesh.material as THREE.MeshStandardMaterial;
+        mat.map?.dispose();
+        mat.map = nextTex;
+        mat.needsUpdate = true;
+      });
+
+      return () => {
+        cancelled = true;
+      };
+    }, [mapaSettingsSig]);
 
     // Synchronize hover marker from bottom elevation profile chart WITHOUT resetting camera
     useEffect(() => {

@@ -15,6 +15,7 @@ import {
   ExternalLink,
 } from 'lucide-react';
 import { Hike, ParticipantProfile } from '../types';
+import { getEffectiveHikeDistanceKm } from '../utils/gpxParser';
 import {
   evaluateMilestonesForParticipant,
   MilestoneStatus,
@@ -147,7 +148,7 @@ export const ParticipantsView: React.FC<ParticipantsViewProps> = ({
       });
 
       const totalKm = matchingHikes.reduce((sum, h) => {
-        const dist = typeof h.distance === 'string' ? parseFloat(h.distance) : h.distance;
+        const dist = getEffectiveHikeDistanceKm(h);
         return sum + (isNaN(dist) ? 0 : dist);
       }, 0);
 

@@ -12,6 +12,7 @@ import {
   Target,
 } from 'lucide-react';
 import { Hike, Coordinate, FilterState } from '../types';
+import { ACTIVITY_OPTIONS } from './ActivityBadge';
 import {
   createShapeDataUrl,
   createProfileDataUrl,
@@ -89,6 +90,9 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
           ) {
             return false;
           }
+        }
+        if (filterState.activity && filterState.activity !== 'all') {
+          if (trip.activity !== filterState.activity) return false;
         }
         return true;
       })
@@ -254,7 +258,8 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
   const hasActiveFilter =
     filterState.year !== 'all' ||
     filterState.month !== 'all' ||
-    filterState.participant !== 'all';
+    filterState.participant !== 'all' ||
+    (Boolean(filterState.activity) && filterState.activity !== 'all');
 
   const renderCompletedMilestoneCard = (milestone: MilestoneStatus) => (
     <div
@@ -410,10 +415,26 @@ export const PrintReportView: React.FC<PrintReportViewProps> = ({
                 </select>
               </div>
 
+              <div className="flex items-center gap-1.5">
+                <label className="text-[11px] text-emerald-200 font-medium">Aktivita:</label>
+                <select
+                  value={filterState.activity || 'all'}
+                  onChange={(e) => onFilterChange({ activity: e.target.value })}
+                  className="bg-emerald-950/60 border border-emerald-500/40 text-white rounded-lg px-2.5 py-1 text-xs font-semibold outline-none"
+                >
+                  <option value="all">Všechny</option>
+                  {ACTIVITY_OPTIONS.map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               {hasActiveFilter && (
                 <button
                   onClick={() =>
-                    onFilterChange({ year: 'all', month: 'all', participant: 'all' })
+                    onFilterChange({ year: 'all', month: 'all', participant: 'all', activity: 'all' })
                   }
                   className="flex items-center gap-1 bg-white/15 hover:bg-white/25 text-white px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer"
                   title="Zrušit všechny filtry"

@@ -24,7 +24,18 @@ import {
   FileText,
 } from 'lucide-react';
 import { PlannedRoute, Coordinate, RoutePart } from '../types';
-import { calculateDistanceKm, parseGpxXml } from '../utils/gpxParser';
+import {
+  parseGpxXml,
+  calculateCoordsDistanceKm,
+  splitIntoContiguousSegments,
+  computeRouteElevationStats,
+  computeElevationProfileData,
+  getEffectiveHikeDistanceKm,
+  ElevationProfileData,
+  SlopeCategory,
+} from '../utils/gpxParser';
+import { createCustomMapaTileLayer } from '../utils/customMapLayer';
+import { MapSettingsControl } from './MapSettingsControl';
 
 interface PlannedRoutesViewProps {
   plannedRoutes: PlannedRoute[];
@@ -44,8 +55,6 @@ interface PlannedRoutesViewProps {
   ) => Promise<string>;
   onDeletePlannedRoute: (id: string) => void;
 }
-
-const MAPY_CZ_API_KEY = '3SfstVBaZryBHeEkOsw_DSAc8PwcV140TQvNslWDrQY';
 
 // High-contrast distinct colors so every planned route stands out clearly on the map
 export const DISTINCT_ROUTE_COLORS = [
@@ -188,15 +197,7 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
         return;
       }
 
-      let distKm = 0;
-      for (let i = 1; i < coords.length; i++) {
-        distKm += calculateDistanceKm(
-          coords[i - 1][0],
-          coords[i - 1][1],
-          coords[i][0],
-          coords[i][1]
-        );
-      }
+      const distKm = calculateCoordsDistanceKm(coords);
 
       setGpxData(xmlString);
       setGpxName(file.name);
@@ -282,30 +283,41 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
     }
   };
 
-  // Overall stats for planned routes
+  // Extract coordinate groups for a planned route (preserving separate segments)
+  const getRouteCoordinateGroups = (route: PlannedRoute): Coordinate[][] => {
+    if (route.routes && route.routes.length > 0) {
+      const groups = route.routes
+        .map((part) => part.coordinates || [])
+        .filter((c) => c.length > 0);
+      if (groups.length > 0) return groups;
+    }
+    return route.coordinates && route.coordinates.length > 0 ? [route.coordinates] : [];
+  };
+
+  // Overall stats for planned routes (excluding non-contiguous transfers / přejezdy)
   const stats = useMemo(() => {
     let totalKm = 0;
     let totalAscent = 0;
     let totalDescent = 0;
 
     plannedRoutes.forEach((route) => {
-      const distNum =
-        typeof route.distance === 'string' ? parseFloat(route.distance) : route.distance;
+      const distNum = getEffectiveHikeDistanceKm({
+        distance: route.distance,
+        routes:
+          route.routes && route.routes.length > 0
+            ? route.routes
+            : route.coordinates
+            ? [{ coordinates: route.coordinates }]
+            : [],
+      });
       if (!isNaN(distNum)) totalKm += distNum;
 
-      const coords = getRouteCoordinates(route);
-      let prevEle: number | null = null;
-      coords.forEach((pt) => {
-        const ele = pt[2];
-        if (typeof ele === 'number' && !isNaN(ele)) {
-          if (prevEle !== null) {
-            const diff = ele - prevEle;
-            if (diff > 0) totalAscent += diff;
-            else totalDescent += Math.abs(diff);
-          }
-          prevEle = ele;
-        }
-      });
+      const groups = getRouteCoordinateGroups(route);
+      const { ascent, descent } = computeRouteElevationStats(
+        groups.map((coordinates) => ({ coordinates }))
+      );
+      totalAscent += ascent;
+      totalDescent += descent;
     });
 
     return {
@@ -337,27 +349,14 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
   }, [selectedRouteId]);
 
   // Elevation profile state
-  const [elevationData, setElevationData] = useState<{
-    title: string;
-    ascent: number;
-    descent: number;
-    maxEle: number;
-    minEle: number;
-    points: {
-      dist: number;
-      ele: number;
-      rawEle: number;
-      gradePct: number;
-      slopeCat: 'flat' | 'std' | 'steep' | 'extreme';
-      coord: [number, number];
-    }[];
-  } | null>(null);
+  const [elevationData, setElevationData] = useState<ElevationProfileData | null>(null);
 
   const [hoveredPoint, setHoveredPoint] = useState<{
     dist: number;
     ele: number;
     gradePct: number;
-    slopeCat: 'flat' | 'std' | 'steep' | 'extreme';
+    slopeCat: SlopeCategory;
+    isTransfer: boolean;
     xPct: number;
     yPct: number;
   } | null>(null);
@@ -371,6 +370,7 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
       zoom: 7,
       zoomControl: false,
     });
+    map.attributionControl.setPrefix(false);
 
     map.createPane('selectedTripPane');
     const selectedPane = map.getPane('selectedTripPane');
@@ -380,28 +380,7 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
 
     L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-    const mapyOutdoor = L.tileLayer(
-      `https://api.mapy.cz/v1/maptiles/outdoor/256/{z}/{x}/{y}?apikey=${MAPY_CZ_API_KEY}`,
-      {
-        minZoom: 2,
-        maxZoom: 19,
-        attribution: '&copy; Seznam.cz a.s., Mapy.cz',
-      }
-    );
-
-    const openTopo = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
-      maxZoom: 17,
-      attribution: 'Map data: &copy; OpenStreetMap contributors',
-    });
-
-    mapyOutdoor.addTo(map);
-    L.control
-      .layers(
-        { 'Mapy.cz Outdoor': mapyOutdoor, OpenTopoMap: openTopo },
-        undefined,
-        { position: 'topleft' }
-      )
-      .addTo(map);
+    createCustomMapaTileLayer().addTo(map);
 
     polylinesLayerRef.current.addTo(map);
     mapInstanceRef.current = map;
@@ -423,74 +402,9 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
       return;
     }
 
-    const coords = getRouteCoordinates(selectedRoute);
-    const ptsWithEle = coords.filter((p) => typeof p[2] === 'number' && !isNaN(p[2]));
-    if (ptsWithEle.length < 2) {
-      setElevationData(null);
-      return;
-    }
-
-    let totalDist = 0;
-    let ascent = 0;
-    let descent = 0;
-    let maxEle = ptsWithEle[0][2] as number;
-    let minEle = ptsWithEle[0][2] as number;
-    const rawPoints: { dist: number; ele: number; rawEle: number; coord: [number, number] }[] = [];
-
-    for (let i = 0; i < ptsWithEle.length; i++) {
-      const curr = ptsWithEle[i];
-      const ele = curr[2] as number;
-      if (i > 0) {
-        const prev = ptsWithEle[i - 1];
-        totalDist += calculateDistanceKm(prev[0], prev[1], curr[0], curr[1]);
-        const diff = ele - (prev[2] as number);
-        if (diff > 0) ascent += diff;
-        else descent += Math.abs(diff);
-      }
-      if (ele > maxEle) maxEle = ele;
-      if (ele < minEle) minEle = ele;
-
-      rawPoints.push({
-        dist: totalDist,
-        ele: Math.round(ele),
-        rawEle: ele,
-        coord: [curr[0], curr[1]],
-      });
-    }
-
-    const points = rawPoints.map((pt, idx) => {
-      if (idx === 0) {
-        return { ...pt, gradePct: 0, slopeCat: 'flat' as const };
-      }
-      let startIdx = idx - 1;
-      while (startIdx > 0 && pt.dist - rawPoints[startIdx].dist < 0.04) {
-        startIdx--;
-      }
-      const dMeters = (pt.dist - rawPoints[startIdx].dist) * 1000;
-      const eleDiff = pt.rawEle - rawPoints[startIdx].rawEle;
-      const gradePct = dMeters > 1 ? (eleDiff / dMeters) * 100 : 0;
-      const absGrade = Math.abs(gradePct);
-
-      let slopeCat: 'flat' | 'std' | 'steep' | 'extreme' = 'flat';
-      if (absGrade >= 20) slopeCat = 'extreme';
-      else if (absGrade >= 10) slopeCat = 'steep';
-      else if (absGrade >= 5) slopeCat = 'std';
-
-      return {
-        ...pt,
-        gradePct,
-        slopeCat,
-      };
-    });
-
-    setElevationData({
-      title: selectedRoute.name,
-      ascent: Math.round(ascent),
-      descent: Math.round(descent),
-      maxEle: Math.round(maxEle),
-      minEle: Math.round(minEle),
-      points,
-    });
+    const coordGroups = getRouteCoordinateGroups(selectedRoute);
+    const profile = computeElevationProfileData(coordGroups, selectedRoute.name);
+    setElevationData(profile);
   }, [selectedRoute, hiddenRoutes]);
 
   // Render Planned Routes Polylines on Leaflet Map
@@ -507,10 +421,9 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
 
     plannedRoutes.forEach((route, idx) => {
       if (hiddenRoutes[route.id]) return;
-      const coords = getRouteCoordinates(route);
-      if (!coords || coords.length === 0) return;
+      const groups = getRouteCoordinateGroups(route);
+      if (groups.length === 0) return;
 
-      hasCoords = true;
       const isSelected = route.id === selectedRouteId;
       const baseColor =
         routeColorMap[route.id] || DISTINCT_ROUTE_COLORS[idx % DISTINCT_ROUTE_COLORS.length];
@@ -521,60 +434,65 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
       const weight = isSelected ? 8 : 5.5;
       const opacity = isSelected ? 1.0 : 0.95;
 
-      const latLngs = coords.map((pt) => [pt[0], pt[1]] as [number, number]);
+      groups.forEach((coords) => {
+        if (coords.length === 0) return;
+        hasCoords = true;
 
-      const shadowLine = L.polyline(latLngs, {
-        color: shadowColor,
-        weight: weight + 3,
-        opacity: shadowOpacity,
-        lineCap: 'round',
-        lineJoin: 'round',
-        pane: isSelected ? 'selectedTripPane' : 'overlayPane',
-      });
+        const latLngs = coords.map((pt) => [pt[0], pt[1]] as [number, number]);
 
-      const mainLine = L.polyline(latLngs, {
-        color: lineColor,
-        weight: weight,
-        opacity: opacity,
-        lineCap: 'round',
-        lineJoin: 'round',
-        pane: isSelected ? 'selectedTripPane' : 'overlayPane',
-      });
+        const shadowLine = L.polyline(latLngs, {
+          color: shadowColor,
+          weight: weight + 3,
+          opacity: shadowOpacity,
+          lineCap: 'round',
+          lineJoin: 'round',
+          pane: isSelected ? 'selectedTripPane' : 'overlayPane',
+        });
 
-      mainLine.bindPopup(
-        `<b>${route.name}</b><br>Plánovaná délka: ${route.distance || '-'} km${
-          route.note ? `<br><span style="color:#64748b">${route.note}</span>` : ''
-        }`
-      );
+        const mainLine = L.polyline(latLngs, {
+          color: lineColor,
+          weight: weight,
+          opacity: opacity,
+          lineCap: 'round',
+          lineJoin: 'round',
+          pane: isSelected ? 'selectedTripPane' : 'overlayPane',
+        });
 
-      mainLine.on('click', (e) => {
-        L.DomEvent.stopPropagation(e);
-        setSelectedRouteId(route.id);
-      });
+        mainLine.bindPopup(
+          `<b>${route.name}</b><br>Plánovaná délka: ${route.distance || '-'} km${
+            route.note ? `<br><span style="color:#64748b">${route.note}</span>` : ''
+          }`
+        );
 
-      mainLine.on('mouseover', function (this: L.Polyline) {
-        if (!isSelected) {
-          this.setStyle({ weight: 8, opacity: 1 });
-          shadowLine.setStyle({ weight: 11, opacity: 1 });
-        }
-      });
+        mainLine.on('click', (e) => {
+          L.DomEvent.stopPropagation(e);
+          setSelectedRouteId(route.id);
+        });
 
-      mainLine.on('mouseout', function (this: L.Polyline) {
-        if (!isSelected) {
-          this.setStyle({ weight: 5.5, opacity: 0.95 });
-          shadowLine.setStyle({ weight: 8.5, opacity: 0.85 });
-        }
-      });
+        mainLine.on('mouseover', function (this: L.Polyline) {
+          if (!isSelected) {
+            this.setStyle({ weight: 8, opacity: 1 });
+            shadowLine.setStyle({ weight: 11, opacity: 1 });
+          }
+        });
 
-      if (isSelected) {
-        selectedLines.push({ layer: mainLine, shadow: shadowLine });
-        mainLine.getLatLngs().forEach((ll) => bounds.extend(ll as L.LatLng));
-      } else {
-        unselectedLines.push({ layer: mainLine, shadow: shadowLine });
-        if (!selectedRouteId) {
+        mainLine.on('mouseout', function (this: L.Polyline) {
+          if (!isSelected) {
+            this.setStyle({ weight: 5.5, opacity: 0.95 });
+            shadowLine.setStyle({ weight: 8.5, opacity: 0.85 });
+          }
+        });
+
+        if (isSelected) {
+          selectedLines.push({ layer: mainLine, shadow: shadowLine });
           mainLine.getLatLngs().forEach((ll) => bounds.extend(ll as L.LatLng));
+        } else {
+          unselectedLines.push({ layer: mainLine, shadow: shadowLine });
+          if (!selectedRouteId) {
+            mainLine.getLatLngs().forEach((ll) => bounds.extend(ll as L.LatLng));
+          }
         }
-      }
+      });
     });
 
     unselectedLines.forEach((item) => {
@@ -587,8 +505,10 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
       polylinesLayerRef.current.addLayer(item.layer);
       item.shadow.bringToFront();
       item.layer.bringToFront();
-      setTimeout(() => item.layer.openPopup(), 100);
     });
+    if (selectedLines.length > 0) {
+      setTimeout(() => selectedLines[0].layer.openPopup(), 100);
+    }
 
     if (hasCoords && bounds.isValid()) {
       map.fitBounds(bounds, {
@@ -599,41 +519,49 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
     }
   }, [plannedRoutes, selectedRouteId, hiddenRoutes, routeColorMap]);
 
-  // Elevation Profile Chart Hover Handler
-  const handleChartMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!elevationData || elevationData.points.length === 0) return;
+  // Shared Elevation Profile Chart Pointer / Touch Updater
+  const updateChartHoverByClientX = (clientX: number, rect: DOMRect) => {
+    if (!elevationData || elevationData.points.length === 0 || rect.width <= 0) return;
 
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - rect.left;
+    const x = clientX - rect.left;
     const pct = Math.max(0, Math.min(1, x / rect.width));
 
     const pts = elevationData.points;
-    const totalDist = pts[pts.length - 1]?.dist || 1;
-    const targetDist = pct * totalDist;
+    const totalPlotDist =
+      elevationData.totalPlotDist || pts[pts.length - 1]?.plotDist || 1;
+    const targetPlotDist = pct * totalPlotDist;
 
     let closestIdx = 0;
     let minDiff = Infinity;
     for (let i = 0; i < pts.length; i++) {
-      const diff = Math.abs(pts[i].dist - targetDist);
+      const diff = Math.abs(pts[i].plotDist - targetPlotDist);
       if (diff < minDiff) {
         minDiff = diff;
         closestIdx = i;
       }
     }
 
+    const insideTransfer = elevationData.transfers.find(
+      (tr) => targetPlotDist >= tr.startPlotDist && targetPlotDist <= tr.endPlotDist
+    );
+
     const point = pts[closestIdx];
     if (!point) return;
 
     const range = elevationData.maxEle - elevationData.minEle || 1;
     const xPct =
-      totalDist > 0 ? (point.dist / totalDist) * 100 : (closestIdx / (pts.length - 1)) * 100;
+      totalPlotDist > 0
+        ? (point.plotDist / totalPlotDist) * 100
+        : (closestIdx / Math.max(1, pts.length - 1)) * 100;
     const yPct = 92 - ((point.ele - elevationData.minEle) / range) * 84;
+    const isTransferHover = Boolean(insideTransfer) || point.isTransfer;
 
     setHoveredPoint({
       dist: point.dist,
       ele: point.ele,
-      gradePct: point.gradePct,
-      slopeCat: point.slopeCat,
+      gradePct: isTransferHover ? 0 : point.gradePct,
+      slopeCat: isTransferHover ? 'transfer' : point.slopeCat,
+      isTransfer: isTransferHover,
       xPct,
       yPct,
     });
@@ -652,6 +580,17 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
     }
   };
 
+  // Elevation Profile Chart Mouse & Touch Handlers
+  const handleChartMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    updateChartHoverByClientX(e.clientX, e.currentTarget.getBoundingClientRect());
+  };
+
+  const handleChartTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (e.touches.length > 0) {
+      updateChartHoverByClientX(e.touches[0].clientX, e.currentTarget.getBoundingClientRect());
+    }
+  };
+
   const handleChartMouseLeave = () => {
     setHoveredPoint(null);
     if (hoverMarkerRef.current && mapInstanceRef.current) {
@@ -661,7 +600,7 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
   };
 
   return (
-    <div className="flex w-full h-[calc(100vh-64px)] relative overflow-hidden bg-slate-100">
+    <div className="flex w-full h-[calc(100vh-100px)] md:h-[calc(100vh-64px)] relative overflow-hidden bg-slate-100">
       {/* Mobile Backdrop */}
       {(leftSidebarOpen || rightSidebarOpen) && (
         <div
@@ -927,49 +866,83 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
 
       {/* CENTER MAP CONTAINER */}
       <main className="flex-1 w-full h-full relative">
-        {/* Mobile Toggle Floating Buttons */}
-        <div className="md:hidden absolute top-3 left-3 z-[400] flex gap-2">
+        {/* Mobile Top-Right Action Button: Plánované trasy */}
+        <div className="md:hidden absolute top-3 right-3 z-[550]">
           <button
-            onClick={() => setLeftSidebarOpen(true)}
-            className="bg-white/95 backdrop-blur-md px-3 h-10 flex items-center gap-1.5 rounded-xl shadow-lg border border-slate-200 text-slate-700 hover:text-emerald-600 text-xs font-bold"
-          >
-            <Menu className="w-4 h-4" />
-            <span>Nová trasa</span>
-          </button>
-        </div>
-
-        <div className="md:hidden absolute bottom-24 left-1/2 -translate-x-1/2 z-[400]">
-          <button
+            type="button"
             onClick={() => setRightSidebarOpen(true)}
-            className="bg-emerald-600 text-white px-5 py-2.5 rounded-full shadow-xl font-bold text-xs flex items-center gap-2 border border-emerald-500"
+            className="bg-emerald-600 hover:bg-emerald-700 text-white h-10 px-3.5 rounded-xl shadow-lg font-bold text-xs flex items-center gap-1.5 border border-emerald-500 active:scale-95 transition-all"
+            title="Otevřít seznam plánovaných tras"
           >
-            <Layers className="w-4 h-4" />
-            <span>Plánované trasy ({plannedRoutes.length})</span>
+            <Layers className="w-4 h-4 shrink-0" />
+            <span>Trasy ({plannedRoutes.length})</span>
           </button>
         </div>
 
         {/* 2D Leaflet Map Div */}
         <div ref={mapContainerRef} className="w-full h-full" />
 
-        {/* Selected Planned Route Floating Bar (Top Center) */}
+        {/* Map Settings Control (icon-only) + Center All Planned Routes icon + Mobile Nová trasa icon */}
+        <MapSettingsControl
+          className="top-3 left-3 md:top-4 md:left-4"
+          onCenterAllRoutes={() => {
+            setSelectedRouteId(null);
+            const map = mapInstanceRef.current;
+            if (!map) return;
+
+            const allBounds = L.latLngBounds([]);
+            plannedRoutes.forEach((route) => {
+              if (hiddenRoutes[route.id]) return;
+              const groups = getRouteCoordinateGroups(route);
+              groups.forEach((coords) => {
+                coords.forEach((pt) => allBounds.extend([pt[0], pt[1]]));
+              });
+            });
+
+            if (allBounds.isValid()) {
+              map.fitBounds(allBounds, {
+                paddingTopLeft: [40, 40],
+                paddingBottomRight: [40, 40],
+                maxZoom: 15,
+              });
+            } else {
+              map.setView([49.8, 15.5], 7);
+            }
+          }}
+          extraButtons={
+            <button
+              type="button"
+              onClick={() => setLeftSidebarOpen(true)}
+              className="md:hidden w-10 h-10 flex items-center justify-center rounded-xl shadow-lg border transition-all backdrop-blur-md cursor-pointer bg-white/95 hover:bg-white text-slate-800 hover:text-emerald-700 border-slate-200/90 hover:border-slate-300 active:scale-95"
+              title="Přidat novou plánovanou trasu"
+              aria-label="Přidat novou plánovanou trasu"
+            >
+              <Plus className="w-4 h-4 text-emerald-600 shrink-0" />
+            </button>
+          }
+        />
+
+        {/* Selected Planned Route Floating Bar (Top Center - clean, non-clipping layout on mobile) */}
         {selectedRoute && (
-          <div className="absolute top-14 sm:top-4 left-1/2 -translate-x-1/2 z-[600] bg-white/95 backdrop-blur-md px-3.5 py-2 rounded-2xl shadow-xl border border-slate-200 flex items-center gap-2 flex-wrap justify-center max-w-[95vw]">
-            <span
-              className="w-3 h-3 rounded-full shrink-0"
-              style={{ backgroundColor: routeColorMap[selectedRoute.id] || '#2563eb' }}
-            />
-            <div className="font-extrabold text-xs text-stone-900 truncate max-w-[180px] sm:max-w-[260px]">
-              {selectedRoute.name}
+          <div className="absolute top-15 sm:top-4 left-1/2 -translate-x-1/2 z-[600] bg-white/95 backdrop-blur-md px-2.5 py-1.5 sm:px-3.5 sm:py-2 rounded-2xl shadow-xl border border-slate-200 flex flex-col sm:flex-row items-center gap-1 sm:gap-2 w-[calc(100vw-24px)] sm:w-auto max-w-[95vw]">
+            <div className="flex items-center gap-1.5 max-w-[90%] sm:max-w-[260px]">
+              <span
+                className="w-3 h-3 rounded-full shrink-0"
+                style={{ backgroundColor: routeColorMap[selectedRoute.id] || '#2563eb' }}
+              />
+              <div className="font-extrabold text-xs text-stone-900 truncate">
+                {selectedRoute.name}
+              </div>
             </div>
 
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center justify-center gap-1 sm:gap-1.5 flex-wrap w-full sm:w-auto">
               <button
                 type="button"
                 onClick={() => onOpen3D?.()}
-                className="bg-slate-900 hover:bg-emerald-700 text-white border border-slate-700 px-2.5 py-1 rounded-lg text-xs font-extrabold flex items-center gap-1 shadow-2xs cursor-pointer transition-all"
+                className="bg-slate-900 hover:bg-emerald-700 text-white border border-slate-700 px-2 py-1 sm:px-2.5 rounded-lg text-[11px] sm:text-xs font-extrabold flex items-center gap-1 shadow-2xs cursor-pointer transition-all shrink-0"
                 title="Zobrazit vybranou plánovanou trasu ve 3D"
               >
-                <Mountain className="w-3.5 h-3.5 text-emerald-400" />
+                <Mountain className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                 <span>3D</span>
               </button>
 
@@ -982,45 +955,45 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
                   }
                   target="_blank"
                   rel="noreferrer"
-                  className="bg-white hover:bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1 shadow-2xs"
+                  className="bg-white hover:bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-1 sm:px-2.5 rounded-lg text-[11px] sm:text-xs font-bold flex items-center gap-1 shadow-2xs shrink-0"
                 >
-                  <ExternalLink className="w-3 h-3" />
+                  <ExternalLink className="w-3 h-3 shrink-0" />
                   <span>Mapa</span>
                 </a>
               )}
 
               <button
                 onClick={() => handleStartEdit(selectedRoute)}
-                className="bg-white hover:bg-amber-50 text-amber-700 border border-amber-200 px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1 shadow-2xs cursor-pointer"
+                className="bg-white hover:bg-amber-50 text-amber-700 border border-amber-200 px-2 py-1 sm:px-2.5 rounded-lg text-[11px] sm:text-xs font-bold flex items-center gap-1 shadow-2xs cursor-pointer shrink-0"
               >
-                <Pencil className="w-3 h-3" />
+                <Pencil className="w-3 h-3 shrink-0" />
                 <span>Upravit</span>
               </button>
 
               <button
                 onClick={() => setSelectedRouteId(null)}
-                className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 px-2 py-1 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer"
+                className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 px-2 py-1 rounded-lg text-[11px] sm:text-xs font-bold flex items-center gap-1 cursor-pointer shrink-0"
                 title="Zrušit výběr"
               >
-                <X className="w-3.5 h-3.5" />
+                <X className="w-3.5 h-3.5 shrink-0" />
               </button>
             </div>
           </div>
         )}
 
-        {/* Elevation Profile Panel (Bottom) */}
+        {/* Elevation Profile Panel (Bottom - 40% smaller on mobile) */}
         {elevationData && (
-          <div className="absolute bottom-4 left-3 right-3 md:left-6 md:right-6 z-[500] bg-white/95 backdrop-blur-md rounded-2xl p-3.5 sm:p-4 shadow-2xl border border-slate-200/90 text-xs transition-all select-none">
-            <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
-              <div className="flex items-center gap-2.5 truncate">
-                <div className="p-1.5 bg-emerald-100 text-emerald-800 rounded-lg shrink-0">
+          <div className="absolute bottom-2 sm:bottom-3 left-2.5 right-2.5 md:left-6 md:right-6 z-[500] bg-white/95 backdrop-blur-md rounded-xl sm:rounded-2xl px-2.5 py-1.5 sm:px-4 sm:py-2.5 shadow-2xl border border-slate-200/90 text-xs transition-all select-none">
+            <div className="flex items-start sm:items-center justify-between gap-2 mb-1 sm:mb-1.5">
+              <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0 flex-1">
+                <div className="hidden sm:flex p-1.5 bg-emerald-100 text-emerald-800 rounded-lg shrink-0">
                   <Mountain className="w-4 h-4" />
                 </div>
-                <div className="truncate">
-                  <h4 className="font-bold text-slate-900 truncate text-xs sm:text-sm">
+                <div className="min-w-0 flex-1">
+                  <h4 className="font-bold text-slate-900 truncate text-[11px] sm:text-sm leading-tight">
                     Výškový profil: {elevationData.title}
                   </h4>
-                  <div className="text-[10px] sm:text-[11px] text-slate-500 flex flex-wrap gap-3 mt-0.5">
+                  <div className="text-[10px] sm:text-[11px] text-slate-500 flex flex-wrap gap-x-2 sm:gap-x-3 gap-y-0.5 mt-0.5 leading-tight">
                     <span className="text-emerald-700 font-semibold">
                       +{elevationData.ascent} m stoupání
                     </span>
@@ -1029,11 +1002,16 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
                     </span>
                     <span>Max: {elevationData.maxEle} m n.m.</span>
                     <span>Min: {elevationData.minEle} m n.m.</span>
+                    {elevationData.transfers.length > 0 && (
+                      <span className="text-slate-900 font-bold">
+                        • {elevationData.transfers.length}× Přejezd
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
 
-              <div className="flex items-center gap-3 ml-auto">
+              <div className="flex items-center gap-2 sm:gap-3 shrink-0">
                 <div className="hidden sm:flex items-center gap-2.5 bg-slate-50 border border-slate-200/80 px-2.5 py-1 rounded-xl text-[10px] font-semibold text-slate-600">
                   <span className="inline-flex items-center gap-1">
                     <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
@@ -1051,11 +1029,17 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
                     <span className="w-2.5 h-2.5 rounded-full bg-rose-600" />
                     <span>Extrém (&gt;20%)</span>
                   </span>
+                  {elevationData.transfers.length > 0 && (
+                    <span className="inline-flex items-center gap-1 font-bold text-slate-900">
+                      <span className="w-2.5 h-2.5 rounded-full bg-slate-950" />
+                      <span>Přejezd</span>
+                    </span>
+                  )}
                 </div>
 
                 <button
                   onClick={() => setElevationData(null)}
-                  className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition-colors"
+                  className="p-1 sm:p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition-colors"
                   title="Zavřít výškový profil"
                 >
                   <X className="w-4 h-4" />
@@ -1066,20 +1050,25 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
             {(() => {
               const range = elevationData.maxEle - elevationData.minEle || 1;
               const pts = elevationData.points;
-              const totalDist = pts[pts.length - 1]?.dist || 1;
+              const totalPlotDist =
+                elevationData.totalPlotDist || pts[pts.length - 1]?.plotDist || 1;
+              const totalWalkedDist =
+                elevationData.totalWalkedDist || pts[pts.length - 1]?.dist || 0;
 
-              const SLOPE_COLORS: Record<'flat' | 'std' | 'steep' | 'extreme', string> = {
+              const SLOPE_COLORS: Record<SlopeCategory, string> = {
                 flat: '#10b981',
                 std: '#3b82f6',
                 steep: '#f59e0b',
                 extreme: '#e11d48',
+                transfer: '#111827',
               };
 
-              const SLOPE_LABELS: Record<'flat' | 'std' | 'steep' | 'extreme', string> = {
+              const SLOPE_LABELS: Record<SlopeCategory, string> = {
                 flat: 'Rovina (< 5 %)',
                 std: 'Standard (5–10 %)',
                 steep: 'Prudký svah (10–20 %)',
                 extreme: 'Extrém (> 20 %)',
+                transfer: 'Přejezd (mimo statistiky)',
               };
 
               const yTicks = [
@@ -1090,21 +1079,33 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
               ];
 
               const xTickCount = 6;
-              const xTicks = Array.from({ length: xTickCount }, (_, idx) =>
-                ((totalDist * idx) / (xTickCount - 1)).toFixed(1)
-              );
+              const xTicks = Array.from({ length: xTickCount }, (_, idx) => {
+                if (idx === 0) return '0.0';
+                if (idx === xTickCount - 1) return totalWalkedDist.toFixed(1);
+                const targetPlot = (totalPlotDist * idx) / (xTickCount - 1);
+                let bestPt = pts[0];
+                let minDiff = Infinity;
+                for (let k = 0; k < pts.length; k++) {
+                  const d = Math.abs(pts[k].plotDist - targetPlot);
+                  if (d < minDiff) {
+                    minDiff = d;
+                    bestPt = pts[k];
+                  }
+                }
+                return (bestPt?.dist ?? 0).toFixed(1);
+              });
 
               const coordsXY = pts.map((p, i) => {
                 const x =
-                  totalDist > 0
-                    ? (p.dist / totalDist) * 1000
+                  totalPlotDist > 0
+                    ? (p.plotDist / totalPlotDist) * 1000
                     : (i / Math.max(1, pts.length - 1)) * 1000;
                 const y = 92 - ((p.ele - elevationData.minEle) / range) * 84;
                 return { x, y, slopeCat: p.slopeCat };
               });
 
               const runs: {
-                cat: 'flat' | 'std' | 'steep' | 'extreme';
+                cat: SlopeCategory;
                 points: { x: number; y: number }[];
               }[] = [];
 
@@ -1127,9 +1128,9 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
               }
 
               return (
-                <div className="space-y-1">
-                  <div className="flex items-stretch h-28 sm:h-36 w-full">
-                    <div className="w-12 pr-2 flex flex-col justify-between text-[10px] font-medium text-slate-400 text-right py-1 shrink-0">
+                <div className="space-y-0.5">
+                  <div className="flex items-stretch h-12 sm:h-24 w-full">
+                    <div className="w-10 sm:w-12 pr-1.5 sm:pr-2 flex flex-col justify-between text-[9px] sm:text-[10px] font-medium text-slate-400 text-right py-0.5 sm:py-1 shrink-0">
                       {yTicks.map((val, i) => (
                         <span key={i} className="leading-none">
                           {val} m
@@ -1138,9 +1139,12 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
                     </div>
 
                     <div
-                      className="flex-1 relative cursor-crosshair bg-slate-50/40 rounded-lg border border-slate-200/70 overflow-hidden"
+                      className="flex-1 relative cursor-crosshair bg-slate-50/40 rounded-lg border border-slate-200/70 overflow-hidden touch-none"
                       onMouseMove={handleChartMouseMove}
                       onMouseLeave={handleChartMouseLeave}
+                      onTouchStart={handleChartTouchMove}
+                      onTouchMove={handleChartTouchMove}
+                      onTouchEnd={handleChartMouseLeave}
                     >
                       <div className="absolute inset-0 flex flex-col justify-between py-2 pointer-events-none">
                         <div className="border-b border-slate-200/60 w-full" />
@@ -1171,6 +1175,10 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
                             <stop offset="0%" stopColor="#e11d48" stopOpacity="0.55" />
                             <stop offset="100%" stopColor="#e11d48" stopOpacity="0.08" />
                           </linearGradient>
+                          <linearGradient id="planEleGrad-transfer" x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stopColor="#111827" stopOpacity="0.38" />
+                            <stop offset="100%" stopColor="#111827" stopOpacity="0.08" />
+                          </linearGradient>
                         </defs>
 
                         {runs.map((run, rIdx) => {
@@ -1199,14 +1207,72 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
                               d={`M ${polyCoords}`}
                               fill="none"
                               stroke={SLOPE_COLORS[run.cat]}
-                              strokeWidth="2.5"
+                              strokeWidth={run.cat === 'transfer' ? '3' : '2.5'}
                               vectorEffect="non-scaling-stroke"
                               strokeLinejoin="round"
                               strokeLinecap="round"
                             />
                           );
                         })}
+
+                        {/* Vertical dashed boundary lines for each Přejezd */}
+                        {elevationData.transfers.map((tr, tIdx) => {
+                          const x1 =
+                            totalPlotDist > 0 ? (tr.startPlotDist / totalPlotDist) * 1000 : 0;
+                          const x2 =
+                            totalPlotDist > 0 ? (tr.endPlotDist / totalPlotDist) * 1000 : 0;
+                          return (
+                            <g key={`tr-bound-${tIdx}`}>
+                              <line
+                                x1={x1}
+                                y1={0}
+                                x2={x1}
+                                y2={100}
+                                stroke="#111827"
+                                strokeWidth="1"
+                                strokeDasharray="3 3"
+                                vectorEffect="non-scaling-stroke"
+                                opacity="0.55"
+                              />
+                              <line
+                                x1={x2}
+                                y1={0}
+                                x2={x2}
+                                y2={100}
+                                stroke="#111827"
+                                strokeWidth="1"
+                                strokeDasharray="3 3"
+                                vectorEffect="non-scaling-stroke"
+                                opacity="0.55"
+                              />
+                            </g>
+                          );
+                        })}
                       </svg>
+
+                      {/* Direct "Přejezd" badges positioned over black transfer segments */}
+                      {elevationData.transfers.map((tr, tIdx) => {
+                        const midPlot = (tr.startPlotDist + tr.endPlotDist) / 2;
+                        const xPct =
+                          totalPlotDist > 0
+                            ? Math.max(4, Math.min(96, (midPlot / totalPlotDist) * 100))
+                            : 50;
+                        const midEle = (tr.startEle + tr.endEle) / 2;
+                        const yPct = Math.max(
+                          20,
+                          Math.min(76, 92 - ((midEle - elevationData.minEle) / range) * 84)
+                        );
+                        return (
+                          <div
+                            key={`tr-label-${tIdx}`}
+                            className="absolute -translate-x-1/2 -translate-y-1/2 pointer-events-none z-10 bg-slate-950/90 text-white text-[9px] sm:text-[10px] font-extrabold px-1.5 py-0.5 rounded-md shadow-sm border border-slate-700 whitespace-nowrap flex items-center gap-1"
+                            style={{ left: `${xPct}%`, top: `${yPct}%` }}
+                          >
+                            <span className="w-1.5 h-1.5 rounded-full bg-white inline-block" />
+                            <span>Přejezd</span>
+                          </div>
+                        );
+                      })}
 
                       {hoveredPoint && (
                         <>
@@ -1243,12 +1309,20 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
                                 className="w-2 h-2 rounded-full inline-block"
                                 style={{ backgroundColor: SLOPE_COLORS[hoveredPoint.slopeCat] }}
                               />
-                              <span className="text-slate-300">Sklon:</span>
-                              <span className="text-white">
-                                {hoveredPoint.gradePct >= 0 ? '+' : ''}
-                                {hoveredPoint.gradePct.toFixed(1)} % (
-                                {SLOPE_LABELS[hoveredPoint.slopeCat]})
-                              </span>
+                              {hoveredPoint.isTransfer ? (
+                                <span className="text-white font-bold">
+                                  Úsek: {SLOPE_LABELS.transfer}
+                                </span>
+                              ) : (
+                                <>
+                                  <span className="text-slate-300">Sklon:</span>
+                                  <span className="text-white">
+                                    {hoveredPoint.gradePct >= 0 ? '+' : ''}
+                                    {hoveredPoint.gradePct.toFixed(1)} % (
+                                    {SLOPE_LABELS[hoveredPoint.slopeCat]})
+                                  </span>
+                                </>
+                              )}
                             </div>
                           </div>
                         </>
@@ -1313,22 +1387,17 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
             plannedRoutes.map((route, idx) => {
               const isSelected = route.id === selectedRouteId;
               const isVisible = !hiddenRoutes[route.id];
-              const coords = getRouteCoordinates(route);
-              const hasGeom = coords.length > 0;
+              const groups = getRouteCoordinateGroups(route);
+              const hasGeom = groups.length > 0;
               const color =
                 routeColorMap[route.id] ||
                 DISTINCT_ROUTE_COLORS[idx % DISTINCT_ROUTE_COLORS.length];
               const mapUrl = route.link || route.routes?.[0]?.link || route.routes?.[0]?.url || '';
 
-              // Calculate ascent if coordinates have elevation
-              let routeAscent = 0;
-              for (let i = 1; i < coords.length; i++) {
-                const e1 = coords[i - 1][2];
-                const e2 = coords[i][2];
-                if (typeof e1 === 'number' && typeof e2 === 'number' && e2 > e1) {
-                  routeAscent += e2 - e1;
-                }
-              }
+              // Calculate ascent if coordinates have elevation (excluding Přejezdy)
+              const { ascent: routeAscent } = computeRouteElevationStats(
+                groups.map((coordinates) => ({ coordinates }))
+              );
 
               return (
                 <div
@@ -1382,7 +1451,12 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
 
                       {/* Title & Metrics */}
                       <div
-                        onClick={() => setSelectedRouteId(isSelected ? null : route.id)}
+                        onClick={() => {
+                          setSelectedRouteId(isSelected ? null : route.id);
+                          if (!isSelected) {
+                            setRightSidebarOpen(false);
+                          }
+                        }}
                         className="cursor-pointer flex-1 overflow-hidden"
                       >
                         <div

@@ -13,8 +13,9 @@ import {
   onSnapshot,
   Firestore,
 } from 'firebase/firestore';
-import { Hike, RoutePart, PlannedRoute, ParticipantProfile } from '../types';
+import { Hike, HikeActivity, RoutePart, PlannedRoute, ParticipantProfile } from '../types';
 import { resolveGpxVal, calculateCoordsDistanceKm } from '../utils/gpxParser';
+import { normalizeHikeActivity } from '../components/ActivityBadge';
 
 const firebaseConfig = {
   apiKey: "AIzaSyDg0j8KCyc-QlSjI80b-CsyLA1pecMlLVE",
@@ -80,6 +81,7 @@ export function saveHikesToStorageSafe(hikes: Hike[]): void {
       endDate: h.endDate,
       participants: h.participants,
       note: h.note,
+      activity: h.activity,
       routes: (h.routes || h.maps || []).map((r) => ({
         distance: r.distance,
         link: r.link || r.url || '',
@@ -304,6 +306,7 @@ export async function processFirestoreDoc(
     endDate: endDateRaw,
     participants: String(data.participants || ''),
     note: String(data.note || data.notes || data.description || ''),
+    activity: normalizeHikeActivity(data.activity),
     routes: routes,
     maps: routes,
     gpx: typeof data.gpx === 'string' ? data.gpx : undefined,
@@ -420,6 +423,7 @@ export async function addHike(hikeData: {
   dateTo?: string;
   participants?: string;
   note?: string;
+  activity?: HikeActivity | '';
   routes?: RoutePart[];
 }) {
   if (!db) throw new Error("Databáze není dostupná");
@@ -432,6 +436,7 @@ export async function addHike(hikeData: {
     dateTo: hikeData.dateTo || '',
     participants: (hikeData.participants || '').trim(),
     note: (hikeData.note || '').trim(),
+    activity: hikeData.activity || '',
     routes: serializeRoutesForFirestore(hikeData.routes),
   };
 
@@ -448,6 +453,7 @@ export async function updateHike(
     dateTo?: string;
     participants?: string;
     note?: string;
+    activity?: HikeActivity | '';
     routes?: RoutePart[];
   }
 ) {
@@ -461,6 +467,7 @@ export async function updateHike(
     dateTo: hikeData.dateTo || '',
     participants: (hikeData.participants || '').trim(),
     note: (hikeData.note || '').trim(),
+    activity: hikeData.activity || '',
     routes: serializeRoutesForFirestore(hikeData.routes),
   };
 
@@ -490,6 +497,7 @@ export async function replaceAllHikesInFirebase(newHikes: Hike[]) {
       dateTo: h.dateTo || '',
       participants: h.participants || '',
       note: h.note || '',
+      activity: h.activity || '',
       routes: serializeRoutesForFirestore(h.routes || h.maps),
     };
     await addDoc(collection(db, 'vyslapy'), payload);

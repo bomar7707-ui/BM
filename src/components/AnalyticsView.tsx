@@ -28,7 +28,14 @@ import {
   Brush,
 } from 'recharts';
 import { Hike, FilterState } from '../types';
-import { calculateDistanceKm, getSegmentDistanceKm } from '../utils/gpxParser';
+import { ACTIVITY_OPTIONS } from './ActivityBadge';
+import {
+  calculateDistanceKm,
+  getSegmentDistanceKm,
+  isTransferStep,
+  getEffectiveHikeDistanceKm,
+  computeRouteElevationStats,
+} from '../utils/gpxParser';
 import { parseSafeDate, formatCzechDate } from '../utils/dateUtils';
 
 interface AnalyticsViewProps {
@@ -57,6 +64,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
   });
   const [filterMonth, setFilterMonth] = useState<string>('all');
   const [filterParticipant, setFilterParticipant] = useState<string>('all');
+  const [filterActivity, setFilterActivity] = useState<string>('all');
 
   // Available options (always include current calendar year)
   const { availableYears, availableParticipants } = useMemo(() => {
@@ -97,9 +105,12 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
           return false;
         }
       }
+      if (filterActivity !== 'all') {
+        if (trip.activity !== filterActivity) return false;
+      }
       return true;
     });
-  }, [hikes, selectedTripId, filterYear, filterMonth, filterParticipant]);
+  }, [hikes, selectedTripId, filterYear, filterMonth, filterParticipant, filterActivity]);
 
   // Overall analytics calculations
   const analytics = useMemo(() => {
@@ -139,7 +150,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
       descGrad4 = 0;
 
     filteredHikes.forEach((trip) => {
-      const distNum = typeof trip.distance === 'string' ? parseFloat(trip.distance) : trip.distance;
+      const distNum = getEffectiveHikeDistanceKm(trip);
       const routes = trip.routes || trip.maps || [];
 
       const startD = parseSafeDate(trip.rawDate) || parseSafeDate(trip.date?.split('–')[0]);
@@ -197,15 +208,18 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
           const p1 = m.coordinates[i - 1];
           const p2 = m.coordinates[i];
 
-          const dKm = calculateDistanceKm(p1[0], p1[1], p2[0], p2[1]);
-          const dMeters = dKm * 1000;
-
           // Elevations
           const ele1 = p1.length >= 3 && p1[2] !== null && !isNaN(p1[2] as number) ? (p1[2] as number) : null;
           const ele2 = p2.length >= 3 && p2[2] !== null && !isNaN(p2[2] as number) ? (p2[2] as number) : null;
 
           if (ele2 !== null && ele2 > tripMaxEle) tripMaxEle = ele2;
           if (ele1 !== null && ele1 > tripMaxEle) tripMaxEle = ele1;
+
+          // Exclude internal Přejezdy from distance, ascent/descent, slope gradients, and altitude zones
+          if (isTransferStep(p1, p2, false)) continue;
+
+          const dKm = calculateDistanceKm(p1[0], p1[1], p2[0], p2[1]);
+          const dMeters = dKm * 1000;
 
           if (ele1 !== null && ele2 !== null) {
             const eleDiff = ele2 - ele1;
@@ -337,7 +351,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
     };
   }, [filteredHikes]);
 
-  // Detailed cumulative elevation data for each hike (sorted oldest to newest)
+  // Detailed cumulative elevation data for each hike (sorted oldest to newest, excluding Přejezdy)
   const cumulativeElevationData = useMemo(() => {
     const sorted = [...filteredHikes].sort((a, b) => {
       const dateA =
@@ -359,35 +373,9 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
 
     return sorted.map((trip, index) => {
       const routes = trip.routes || trip.maps || [];
-      let tripAsc = 0;
-      let tripDesc = 0;
-      let tripMaxEle = 0;
-
-      routes.forEach((m) => {
-        if (!m.coordinates || m.coordinates.length < 2) return;
-        for (let i = 1; i < m.coordinates.length; i++) {
-          const p1 = m.coordinates[i - 1];
-          const p2 = m.coordinates[i];
-          const ele1 =
-            p1.length >= 3 && p1[2] !== null && !isNaN(p1[2] as number) ? (p1[2] as number) : null;
-          const ele2 =
-            p2.length >= 3 && p2[2] !== null && !isNaN(p2[2] as number) ? (p2[2] as number) : null;
-
-          if (ele1 !== null && ele1 > tripMaxEle) tripMaxEle = ele1;
-          if (ele2 !== null && ele2 > tripMaxEle) tripMaxEle = ele2;
-
-          if (ele1 !== null && ele2 !== null) {
-            const diff = ele2 - ele1;
-            if (diff > 0) tripAsc += diff;
-            else tripDesc += Math.abs(diff);
-          }
-        }
-      });
-
-      const ascRounded = Math.round(tripAsc);
-      const descRounded = Math.round(tripDesc);
-      const distNum =
-        typeof trip.distance === 'string' ? parseFloat(trip.distance) || 0 : trip.distance || 0;
+      const { ascent: ascRounded, descent: descRounded, maxEle: tripMaxEle } =
+        computeRouteElevationStats(routes);
+      const distNum = getEffectiveHikeDistanceKm(trip);
 
       runningAscent += ascRounded;
       runningDescent += descRounded;
@@ -408,19 +396,22 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
         hikeDescent: descRounded,
         cumulativeAscent: runningAscent,
         cumulativeDescent: runningDescent,
-        maxElevation: Math.round(tripMaxEle),
+        maxElevation: tripMaxEle !== null && tripMaxEle > 0 ? Math.round(tripMaxEle) : 0,
       };
     });
   }, [filteredHikes]);
 
-  // If a single hike is selected, also compute its step-by-step cumulative elevation along the route
+  // If a single hike is selected, also compute its step-by-step cumulative elevation along the route (excluding Přejezdy)
   const singleTripCumulativeProfile = useMemo(() => {
     if (selectedTripId === 'all' || filteredHikes.length !== 1) return null;
     const trip = filteredHikes[0];
     const routes = trip.routes || trip.maps || [];
-    const allCoords = routes.flatMap((r) => r.coordinates || []);
-    const ptsWithEle = allCoords.filter((p) => typeof p[2] === 'number' && !isNaN(p[2] as number));
-    if (ptsWithEle.length < 2) return null;
+
+    const validGroups = routes
+      .map((r) => (r.coordinates || []).filter((p) => typeof p[2] === 'number' && !isNaN(p[2] as number)))
+      .filter((g) => g.length > 0);
+
+    if (validGroups.length === 0) return null;
 
     let cumDist = 0;
     let cumAsc = 0;
@@ -431,30 +422,50 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
       altitude: number;
       cumulativeAscent: number;
       cumulativeDescent: number;
-    }[] = [
-      {
-        distKm: 0,
-        altitude: Math.round(ptsWithEle[0][2] as number),
-        cumulativeAscent: 0,
-        cumulativeDescent: 0,
-      },
-    ];
+    }[] = [];
 
-    for (let i = 1; i < ptsWithEle.length; i++) {
-      const prev = ptsWithEle[i - 1];
-      const curr = ptsWithEle[i];
-      cumDist += calculateDistanceKm(prev[0], prev[1], curr[0], curr[1]);
-      const diff = (curr[2] as number) - (prev[2] as number);
-      if (diff > 0) cumAsc += diff;
-      else cumDesc += Math.abs(diff);
+    let prevPt: [number, number, number?] | null = null;
 
-      rawSteps.push({
-        distKm: Number(cumDist.toFixed(2)),
-        altitude: Math.round(curr[2] as number),
-        cumulativeAscent: Math.round(cumAsc),
-        cumulativeDescent: Math.round(cumDesc),
-      });
+    for (let gIdx = 0; gIdx < validGroups.length; gIdx++) {
+      const group = validGroups[gIdx];
+      for (let i = 0; i < group.length; i++) {
+        const curr = group[i];
+        const currEle = curr[2] as number;
+
+        if (!prevPt) {
+          rawSteps.push({
+            distKm: 0,
+            altitude: Math.round(currEle),
+            cumulativeAscent: 0,
+            cumulativeDescent: 0,
+          });
+          prevPt = curr;
+          continue;
+        }
+
+        const isBetweenGroups = i === 0;
+        const isTransfer = isBetweenGroups && isTransferStep(prevPt, curr, true);
+
+        // If this step is a Přejezd between two non-contiguous route segments, do not add distance or elevation change to statistics
+        if (!isTransfer) {
+          cumDist += calculateDistanceKm(prevPt[0], prevPt[1], curr[0], curr[1]);
+          const diff = currEle - (prevPt[2] as number);
+          if (diff > 0) cumAsc += diff;
+          else cumDesc += Math.abs(diff);
+        }
+
+        rawSteps.push({
+          distKm: Number(cumDist.toFixed(2)),
+          altitude: Math.round(currEle),
+          cumulativeAscent: Math.round(cumAsc),
+          cumulativeDescent: Math.round(cumDesc),
+        });
+
+        prevPt = curr;
+      }
     }
+
+    if (rawSteps.length < 2) return null;
 
     // Downsample to at most ~120 points for smooth Recharts rendering
     const maxPts = 120;
@@ -542,7 +553,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
           </div>
 
           {/* Filters Bar */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-2 border-t border-slate-100">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 pt-2 border-t border-slate-100">
             <div>
               <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block mb-1">
                 Vybraná trasa
@@ -631,6 +642,24 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                 {availableParticipants.map((p) => (
                   <option key={p} value={p}>
                     {p}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block mb-1">
+                Aktivita
+              </label>
+              <select
+                value={filterActivity}
+                onChange={(e) => setFilterActivity(e.target.value)}
+                className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 outline-none"
+              >
+                <option value="all">Všechny aktivity</option>
+                {ACTIVITY_OPTIONS.map((opt) => (
+                  <option key={opt.id} value={opt.id}>
+                    {opt.label}
                   </option>
                 ))}
               </select>

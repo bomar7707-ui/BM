@@ -14,7 +14,7 @@ import {
   X,
   Trophy,
   Route,
-  BedDouble,
+  Compass,
 } from 'lucide-react';
 import { HikerIcon } from './ParticipantsView';
 import { LOGO_DATA_URL } from '../assets/logoDataUrl';
@@ -73,7 +73,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'map' as ActiveTab, label: 'Mapa a trasy', icon: MapPin, desc: 'Interaktivní zobrazení' },
     { id: 'planned' as ActiveTab, label: 'Plánované trasy', icon: Route, desc: 'Plánování a GPX' },
     { id: 'journal' as ActiveTab, label: 'Zápisník', icon: BookOpen, desc: 'Zadávání a správa' },
-    { id: 'accommodation' as ActiveTab, label: 'Ubytování', icon: BedDouble, desc: 'Se psem na 1 noc' },
+    { id: 'accommodation' as ActiveTab, label: 'Zázemí na trase', icon: Compass, desc: 'Ubytování, jídlo a parkování' },
     { id: 'analytics' as ActiveTab, label: 'Analytika', icon: BarChart3, desc: 'Statistiky a rekordy' },
     { id: 'milestones' as ActiveTab, label: 'Milníky', icon: Trophy, desc: 'Výzvy a trofeje' },
   ];
@@ -153,47 +153,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </>
               )}
             </div>
-
-            {/* Mobile Quick Buttons: Analytika & Milníky (replaces Tisk & Export on mobile) */}
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab('analytics');
-                setMobileMenuOpen(false);
-              }}
-              className={`md:hidden bg-white hover:bg-stone-50 border ${
-                activeTab === 'analytics'
-                  ? 'border-emerald-500 text-emerald-700 ring-2 ring-emerald-500/20'
-                  : 'border-stone-200 text-stone-700'
-              } p-2 rounded-xl text-xs transition-all flex items-center justify-center shadow-xs cursor-pointer`}
-              title="Analytika"
-            >
-              <BarChart3
-                className={`w-4 h-4 ${
-                  activeTab === 'analytics' ? 'text-emerald-600' : 'text-stone-600'
-                }`}
-              />
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab('milestones');
-                setMobileMenuOpen(false);
-              }}
-              className={`md:hidden bg-white hover:bg-stone-50 border ${
-                activeTab === 'milestones'
-                  ? 'border-emerald-500 text-emerald-700 ring-2 ring-emerald-500/20'
-                  : 'border-stone-200 text-stone-700'
-              } p-2 rounded-xl text-xs transition-all flex items-center justify-center shadow-xs cursor-pointer`}
-              title="Milníky"
-            >
-              <Trophy
-                className={`w-4 h-4 ${
-                  activeTab === 'milestones' ? 'text-emerald-600' : 'text-stone-600'
-                }`}
-              />
-            </button>
 
             {/* Desktop Tisk a PDF Button */}
             <button
@@ -312,9 +271,9 @@ export const Navbar: React.FC<NavbarProps> = ({
             {/* Version Label next to Export */}
             <span
               className="hidden md:inline-block text-[10px] font-medium text-stone-400 select-none ml-0.5"
-              title="Verze aplikace 3.0"
+              title="Verze aplikace 4.0"
             >
-              v3.0
+              v4.0
             </span>
 
             {/* Hidden File Inputs (shared between desktop and mobile) */}
@@ -337,10 +296,47 @@ export const Navbar: React.FC<NavbarProps> = ({
             <button
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
               className="md:hidden p-2 rounded-xl border border-stone-200 text-stone-700 hover:bg-stone-50"
+              title="Nástroje, účastníci a záloha dat"
             >
               {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
             </button>
           </div>
+        </div>
+
+        {/* Mobile Quick Navigation Strip (1-tap access to all primary sections) */}
+        <div className="md:hidden flex items-center gap-1 pb-2 overflow-x-auto no-scrollbar">
+          {[
+            { id: 'map' as ActiveTab, shortLabel: 'Mapa', icon: MapPin },
+            { id: 'planned' as ActiveTab, shortLabel: 'Plánované', icon: Route },
+            { id: 'journal' as ActiveTab, shortLabel: 'Zápisník', icon: BookOpen },
+            { id: 'accommodation' as ActiveTab, shortLabel: 'Zázemí', icon: Compass },
+            { id: 'analytics' as ActiveTab, shortLabel: 'Analytika', icon: BarChart3 },
+            { id: 'milestones' as ActiveTab, shortLabel: 'Milníky', icon: Trophy },
+          ].map((item) => {
+            const Icon = item.icon;
+            const isActive =
+              activeTab === item.id ||
+              (item.id === 'map' && activeTab === 'route3d') ||
+              (item.id === 'planned' && activeTab === 'planned3d');
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => {
+                  setActiveTab(item.id);
+                  setMobileMenuOpen(false);
+                }}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all shrink-0 cursor-pointer ${
+                  isActive
+                    ? 'bg-emerald-600 text-white shadow-xs'
+                    : 'bg-stone-100 text-stone-700 hover:bg-stone-200/80'
+                }`}
+              >
+                <Icon className="w-3.5 h-3.5 shrink-0" />
+                <span>{item.shortLabel}</span>
+              </button>
+            );
+          })}
         </div>
 
         {/* Mobile Navigation Dropdown */}
@@ -403,8 +399,8 @@ export const Navbar: React.FC<NavbarProps> = ({
                     : 'bg-stone-50 text-stone-700 hover:bg-stone-100'
                 }`}
               >
-                <BedDouble className="w-4 h-4" />
-                <span>Ubytování (se psem)</span>
+                <Compass className="w-4 h-4" />
+                <span>Zázemí na trase</span>
               </button>
 
               <button
@@ -440,8 +436,11 @@ export const Navbar: React.FC<NavbarProps> = ({
 
             {/* Záloha, GPX a export dat inside Mobile Menu */}
             <div className="pt-2 border-t border-stone-100 space-y-1.5">
-              <div className="text-[10px] font-bold uppercase tracking-wider text-stone-400 px-1">
-                GPX soubory, záloha a export dat
+              <div className="flex items-center justify-between px-1">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-stone-400">
+                  GPX soubory, záloha a export dat
+                </div>
+                <span className="text-[10px] font-medium text-stone-400 select-none">v4.0</span>
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <button

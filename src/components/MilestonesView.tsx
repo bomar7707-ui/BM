@@ -13,7 +13,12 @@ import {
   MapPin,
 } from 'lucide-react';
 import { Hike } from '../types';
-import { calculateDistanceKm, getSegmentDistanceKm } from '../utils/gpxParser';
+import {
+  calculateDistanceKm,
+  getSegmentDistanceKm,
+  isTransferStep,
+  getEffectiveHikeDistanceKm,
+} from '../utils/gpxParser';
 import { parseSafeDate, formatCzechDate, getDisplayDateRange } from '../utils/dateUtils';
 
 interface MilestonesViewProps {
@@ -92,6 +97,7 @@ export const MilestonesView: React.FC<MilestonesViewProps> = ({ hikes, onSelectT
   const currentCalendarYear = new Date().getFullYear();
   const [filterYear, setFilterYear] = useState<string>(currentCalendarYear.toString());
   const [filterParticipant, setFilterParticipant] = useState<string>('all');
+  const [filterActivity, setFilterActivity] = useState<string>('all');
   const [filterStatus, setFilterStatus] = useState<'all' | 'completed' | 'pending'>('all');
 
   // Extract available years and participants from all hikes (always include current calendar year)
@@ -138,6 +144,9 @@ export const MilestonesView: React.FC<MilestonesViewProps> = ({ hikes, onSelectT
           return false;
         }
       }
+      if (filterActivity !== 'all') {
+        if (trip.activity !== filterActivity) return false;
+      }
       return true;
     });
 
@@ -178,8 +187,8 @@ export const MilestonesView: React.FC<MilestonesViewProps> = ({ hikes, onSelectT
         activeDates.push(normStart);
       }
 
-      // Distance
-      let distKm = typeof trip.distance === 'string' ? parseFloat(trip.distance) : trip.distance;
+      // Distance (excluding non-contiguous transfers / Přejezdy)
+      let distKm = getEffectiveHikeDistanceKm(trip);
       if (isNaN(distKm)) distKm = 0;
 
       // Ascent & Max elevation from coordinates
@@ -202,6 +211,7 @@ export const MilestonesView: React.FC<MilestonesViewProps> = ({ hikes, onSelectT
             }
             if (i > 0) {
               const prev = m.coordinates[i - 1];
+              if (isTransferStep(prev, pt, false)) continue;
               calcDistKm += calculateDistanceKm(prev[0], prev[1], pt[0], pt[1]);
               const prevEle =
                 prev.length >= 3 && typeof prev[2] === 'number' && !isNaN(prev[2]) ? prev[2] : null;
@@ -261,7 +271,7 @@ export const MilestonesView: React.FC<MilestonesViewProps> = ({ hikes, onSelectT
     // Sort oldest to newest
     mapped.sort((a, b) => a.startDate.getTime() - b.startDate.getTime());
     return mapped;
-  }, [hikes, filterYear, filterParticipant]);
+  }, [hikes, filterYear, filterParticipant, filterActivity]);
 
   // Evaluate all 31 milestones
   const milestones = useMemo<MilestoneStatus[]>(() => {
@@ -1068,6 +1078,7 @@ export const MilestonesView: React.FC<MilestonesViewProps> = ({ hikes, onSelectT
   const hasCustomFilter =
     filterYear !== currentCalendarYear.toString() ||
     filterParticipant !== 'all' ||
+    filterActivity !== 'all' ||
     filterStatus !== 'all';
 
   return (
@@ -1157,6 +1168,22 @@ export const MilestonesView: React.FC<MilestonesViewProps> = ({ hikes, onSelectT
 
             <div>
               <label className="block text-[10px] font-bold uppercase tracking-wider text-stone-500 mb-1">
+                Aktivita
+              </label>
+              <select
+                value={filterActivity}
+                onChange={(e) => setFilterActivity(e.target.value)}
+                className="bg-stone-50 hover:bg-stone-100/80 border border-stone-200 rounded-xl px-3 py-1.5 text-xs font-semibold text-stone-800 outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+              >
+                <option value="all">Všechny aktivity</option>
+                <option value="hiking">Turistika</option>
+                <option value="running">Běh</option>
+                <option value="cycling">Kolo</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-bold uppercase tracking-wider text-stone-500 mb-1">
                 Stav milníku
               </label>
               <select
@@ -1176,6 +1203,7 @@ export const MilestonesView: React.FC<MilestonesViewProps> = ({ hikes, onSelectT
                 onClick={() => {
                   setFilterYear(currentCalendarYear.toString());
                   setFilterParticipant('all');
+                  setFilterActivity('all');
                   setFilterStatus('all');
                 }}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-rose-600 bg-rose-50 hover:bg-rose-100 border border-rose-200 transition-colors cursor-pointer"
