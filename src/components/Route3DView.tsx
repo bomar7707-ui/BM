@@ -623,7 +623,7 @@ export const Route3DView: React.FC<Route3DViewProps> = ({
 
   if (!activeRouteInfo) {
     return (
-      <div className="flex flex-col items-center justify-center h-[calc(100vh-100px)] md:h-[calc(100vh-64px)] bg-slate-100 p-6 text-center space-y-4">
+      <div className="flex flex-col items-center justify-center h-full md:h-[calc(100vh-64px)] bg-slate-100 p-6 text-center space-y-4">
         <p className="text-sm font-semibold text-slate-600">
           Pro 3D zobrazení není vybrána žádná trasa.
         </p>
@@ -645,12 +645,12 @@ export const Route3DView: React.FC<Route3DViewProps> = ({
   const { ascent: totalAscentMeters } = computeRouteElevationStats(routes);
 
   return (
-    <div className="flex w-full h-[calc(100vh-100px)] md:h-[calc(100vh-64px)] relative overflow-hidden bg-slate-900">
+    <div className="flex w-full h-full md:h-[calc(100vh-64px)] relative overflow-hidden bg-slate-900">
       {/* Mobile Backdrop */}
       {rightSidebarOpen && (
         <div
           onClick={() => setRightSidebarOpen(false)}
-          className="fixed inset-0 bg-slate-900/40 z-[900] backdrop-blur-xs md:hidden"
+          className="absolute inset-0 bg-slate-900/40 z-[900] backdrop-blur-xs md:hidden"
         />
       )}
 
@@ -1265,7 +1265,7 @@ export const Route3DView: React.FC<Route3DViewProps> = ({
           2. "Vybraná trasa (3D)" + Selected Route Card
           3. Bottom 3D controls in the bottom section of the right panel (obr. 3) */}
       <aside
-        className={`absolute md:relative right-0 z-[950] md:z-20 w-[330px] sm:w-[365px] bg-white border-l border-slate-200 flex flex-col h-full shadow-2xl md:shadow-none transition-transform duration-300 ${
+        className={`absolute md:relative right-0 z-[950] md:z-20 w-[330px] max-w-[88%] md:max-w-none sm:w-[365px] bg-white border-l border-slate-200 flex flex-col h-full shadow-2xl md:shadow-none transition-transform duration-300 ${
           rightSidebarOpen ? 'translate-x-0' : 'translate-x-full md:translate-x-0'
         }`}
       >

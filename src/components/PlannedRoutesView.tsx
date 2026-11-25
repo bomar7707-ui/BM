@@ -600,7 +600,7 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
   };
 
   return (
-    <div className="flex w-full h-[calc(100vh-100px)] md:h-[calc(100vh-64px)] relative overflow-hidden bg-slate-100">
+    <div className="flex w-full h-full md:h-[calc(100vh-64px)] relative overflow-hidden bg-slate-100">
       {/* Mobile Backdrop */}
       {(leftSidebarOpen || rightSidebarOpen) && (
         <div
@@ -608,13 +608,13 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
             setLeftSidebarOpen(false);
             setRightSidebarOpen(false);
           }}
-          className="fixed inset-0 bg-slate-900/40 z-[900] backdrop-blur-xs md:hidden"
+          className="absolute inset-0 bg-slate-900/40 z-[900] backdrop-blur-xs md:hidden"
         />
       )}
 
       {/* LEFT SIDEBAR: Simplified Journal (Zjednodušený zápisník) + Summary */}
       <aside
-        className={`absolute md:relative z-[950] md:z-20 w-[300px] sm:w-[310px] bg-white border-r border-slate-200 flex flex-col h-full shadow-2xl md:shadow-none transition-transform duration-300 ${
+        className={`absolute md:relative z-[950] md:z-20 w-[300px] max-w-[88%] md:max-w-none sm:w-[310px] bg-white border-r border-slate-200 flex flex-col h-full shadow-2xl md:shadow-none transition-transform duration-300 ${
           leftSidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'
         }`}
       >
@@ -924,7 +924,7 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
 
         {/* Selected Planned Route Floating Bar (Top Center - clean, non-clipping layout on mobile) */}
         {selectedRoute && (
-          <div className="absolute top-15 sm:top-4 left-1/2 -translate-x-1/2 z-[600] bg-white/95 backdrop-blur-md px-2.5 py-1.5 sm:px-3.5 sm:py-2 rounded-2xl shadow-xl border border-slate-200 flex flex-col sm:flex-row items-center gap-1 sm:gap-2 w-[calc(100vw-24px)] sm:w-auto max-w-[95vw]">
+          <div className="absolute top-15 sm:top-4 left-1/2 -translate-x-1/2 z-[600] bg-white/95 backdrop-blur-md px-2.5 py-1.5 sm:px-3.5 sm:py-2 rounded-2xl shadow-xl border border-slate-200 flex flex-col sm:flex-row items-center gap-1 sm:gap-2 w-[calc(100%-20px)] sm:w-auto max-w-[95%]">
             <div className="flex items-center gap-1.5 max-w-[90%] sm:max-w-[260px]">
               <span
                 className="w-3 h-3 rounded-full shrink-0"
@@ -1344,7 +1344,7 @@ export const PlannedRoutesView: React.FC<PlannedRoutesViewProps> = ({
 
       {/* RIGHT SIDEBAR: Planned Routes List */}
       <aside
-        className={`absolute md:relative right-0 z-[950] md:z-20 w-[320px] sm:w-[350px] bg-white border-l border-slate-200 flex flex-col h-full shadow-2xl md:shadow-none transition-transform duration-300 ${
+        className={`absolute md:relative right-0 z-[950] md:z-20 w-[320px] max-w-[88%] md:max-w-none sm:w-[350px] bg-white border-l border-slate-200 flex flex-col h-full shadow-2xl md:shadow-none transition-transform duration-300 ${
           rightSidebarOpen ? 'translate-x-0' : 'translate-x-full md:translate-x-0'
         }`}
       >

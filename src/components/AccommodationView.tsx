@@ -1125,7 +1125,7 @@ export const AccommodationView: React.FC<AccommodationViewProps> = ({
         : 'parkoviště a odstavné plochy';
 
   return (
-    <div className="flex flex-col md:flex-row w-full h-[calc(100vh-100px)] md:h-[calc(100vh-64px)] bg-stone-50 overflow-hidden">
+    <div className="flex flex-col md:flex-row w-full h-full md:h-[calc(100vh-64px)] bg-stone-50 overflow-hidden">
       {/* Mobile List / Map Switcher */}
       <div className="md:hidden flex items-center justify-between px-3 py-2 bg-white border-b border-stone-200 shrink-0">
         <div className="text-xs font-semibold text-stone-700 truncate pr-2">

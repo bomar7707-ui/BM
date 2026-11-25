@@ -8,6 +8,7 @@ import {
   getMapaSettingsSignature,
   subscribeMapaSettings,
 } from './mapSettings';
+import { fetchWithOfflineTileCache, isEffectivelyOffline } from './offlineManager';
 
 /**
  * High-Performance Custom Czech & World Cartographic Map Engine (Mapa v1.3.0).
@@ -32,12 +33,13 @@ const MAX_SAT_Z = 13;
 
 const FALLBACK_OPENFREEMAP_TEMPLATE =
   'https://tiles.openfreemap.org/planet/20261115_080022_pt/{z}/{x}/{y}.pbf';
+const VECTOR_TEMPLATE_STORAGE_KEY = 'horsky_openfreemap_template_v1';
 
-const TERRARIUM_DEM_URL = (z: number, x: number, y: number) =>
+export const TERRARIUM_DEM_URL = (z: number, x: number, y: number) =>
   `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`;
 
 // EOX Sentinel-2 Cloudless 2024 (WMTS /{z}/{y}/{x}.jpg)
-const SENTINEL2_TILE_URL = (z: number, x: number, y: number) =>
+export const SENTINEL2_TILE_URL = (z: number, x: number, y: number) =>
   `https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2024_3857/default/g/${z}/${y}/${x}.jpg`;
 
 // ---------------------------------------------------------------------------
@@ -144,18 +146,39 @@ const VT_INFLIGHT = new Map<string, Promise<DecodedVectorTile | null>>();
 const DEM_CACHE = new Map<string, Float32Array | null>();
 const DEM_INFLIGHT = new Map<string, Promise<Float32Array | null>>();
 const SAT_CACHE = new Map<string, HTMLImageElement | null>();
+const SAT_OBJECT_URLS = new Map<string, string>();
 const SAT_INFLIGHT = new Map<string, Promise<HTMLImageElement | null>>();
 const RENDERED_TILE_CACHE = new Map<string, HTMLCanvasElement>();
 
 let resolvedVectorTemplate: string | null = null;
 let vectorTemplatePromise: Promise<string> | null = null;
 
-function resolveVectorTileTemplate(): Promise<string> {
+function readStoredVectorTemplate(): string | null {
+  if (typeof localStorage === 'undefined') return null;
+  try {
+    const val = localStorage.getItem(VECTOR_TEMPLATE_STORAGE_KEY);
+    return val && val.includes('{z}') ? val : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistVectorTemplate(tpl: string): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(VECTOR_TEMPLATE_STORAGE_KEY, tpl);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function resolveVectorTileTemplate(): Promise<string> {
   if (resolvedVectorTemplate) return Promise.resolve(resolvedVectorTemplate);
   if (vectorTemplatePromise) return vectorTemplatePromise;
 
-  if (typeof fetch === 'undefined') {
-    resolvedVectorTemplate = FALLBACK_OPENFREEMAP_TEMPLATE;
+  const stored = readStoredVectorTemplate();
+  if (typeof fetch === 'undefined' || isEffectivelyOffline()) {
+    resolvedVectorTemplate = stored || FALLBACK_OPENFREEMAP_TEMPLATE;
     return Promise.resolve(resolvedVectorTemplate);
   }
 
@@ -164,14 +187,18 @@ function resolveVectorTileTemplate(): Promise<string> {
     .then((tj) => {
       if (tj && Array.isArray(tj.tiles) && typeof tj.tiles[0] === 'string') {
         resolvedVectorTemplate = tj.tiles[0];
+        persistVectorTemplate(resolvedVectorTemplate);
         return resolvedVectorTemplate;
       }
-      resolvedVectorTemplate = FALLBACK_OPENFREEMAP_TEMPLATE;
+      resolvedVectorTemplate = stored || FALLBACK_OPENFREEMAP_TEMPLATE;
       return resolvedVectorTemplate;
     })
     .catch(() => {
-      resolvedVectorTemplate = FALLBACK_OPENFREEMAP_TEMPLATE;
+      resolvedVectorTemplate = stored || FALLBACK_OPENFREEMAP_TEMPLATE;
       return resolvedVectorTemplate;
+    })
+    .finally(() => {
+      vectorTemplatePromise = null;
     });
 
   return vectorTemplatePromise;
@@ -590,9 +617,9 @@ async function fetchDecodedVectorTile(
         .replace('{z}', String(z))
         .replace('{x}', String(x))
         .replace('{y}', String(y));
-      const res = await fetch(url);
-      if (!res.ok) {
-        if (res.status === 404 || res.status === 204) {
+      const res = await fetchWithOfflineTileCache(url);
+      if (!res || !res.ok) {
+        if (res && (res.status === 404 || res.status === 204)) {
           setLru(DECODED_VT_CACHE, key, null, MAX_VT_CACHE);
         }
         return null;
@@ -630,6 +657,20 @@ function getDemDecodeCtx(): CanvasRenderingContext2D | null {
   return demDecodeCtx;
 }
 
+function decodeBlobToImage(blob: Blob): Promise<{ img: HTMLImageElement; objectUrl: string } | null> {
+  return new Promise((resolve) => {
+    const objectUrl = URL.createObjectURL(blob);
+    const img = new Image();
+    img.decoding = 'async';
+    img.onload = () => resolve({ img, objectUrl });
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(null);
+    };
+    img.src = objectUrl;
+  });
+}
+
 function loadTerrariumTile(z: number, x: number, y: number): Promise<Float32Array | null> {
   const key = `${z}/${x}/${y}`;
   if (DEM_CACHE.has(key)) {
@@ -640,64 +681,100 @@ function loadTerrariumTile(z: number, x: number, y: number): Promise<Float32Arra
   const existing = DEM_INFLIGHT.get(key);
   if (existing) return existing;
 
-  const req = new Promise<Float32Array | null>((resolve) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.decoding = 'async';
-    img.onload = () => {
-      try {
-        const cCtx = getDemDecodeCtx();
-        if (!cCtx) {
-          resolve(null);
-          return;
+  const req = (async (): Promise<Float32Array | null> => {
+    try {
+      const res = await fetchWithOfflineTileCache(TERRARIUM_DEM_URL(z, x, y));
+      if (!res || !res.ok) return null;
+      const blob = await res.blob();
+      const cCtx = getDemDecodeCtx();
+      if (!cCtx) return null;
+
+      if (typeof createImageBitmap === 'function') {
+        const bitmap = await createImageBitmap(blob);
+        try {
+          cCtx.drawImage(bitmap, 0, 0, 256, 256);
+        } finally {
+          bitmap.close();
         }
-        cCtx.drawImage(img, 0, 0, 256, 256);
-        const rgba = cCtx.getImageData(0, 0, 256, 256).data;
-        const out = new Float32Array(256 * 256);
-        for (let i = 0; i < 256 * 256; i++) {
-          const p = i << 2;
-          const elev = rgba[p] * 256 + rgba[p + 1] + rgba[p + 2] * 0.00390625 - 32768;
-          out[i] = elev < -11000 ? -11000 : elev > 9000 ? 9000 : elev;
+      } else {
+        const loaded = await decodeBlobToImage(blob);
+        if (!loaded) return null;
+        try {
+          cCtx.drawImage(loaded.img, 0, 0, 256, 256);
+        } finally {
+          URL.revokeObjectURL(loaded.objectUrl);
         }
-        setLru(DEM_CACHE, key, out, MAX_DEM_CACHE);
-        resolve(out);
-      } catch {
-        resolve(null);
       }
-    };
-    img.onerror = () => resolve(null);
-    img.src = TERRARIUM_DEM_URL(z, x, y);
-  }).finally(() => {
-    DEM_INFLIGHT.delete(key);
-  });
+
+      const rgba = cCtx.getImageData(0, 0, 256, 256).data;
+      const out = new Float32Array(256 * 256);
+      for (let i = 0; i < 256 * 256; i++) {
+        const p = i << 2;
+        const elev = rgba[p] * 256 + rgba[p + 1] + rgba[p + 2] * 0.00390625 - 32768;
+        out[i] = elev < -11000 ? -11000 : elev > 9000 ? 9000 : elev;
+      }
+      setLru(DEM_CACHE, key, out, MAX_DEM_CACHE);
+      return out;
+    } catch {
+      return null;
+    } finally {
+      DEM_INFLIGHT.delete(key);
+    }
+  })();
 
   DEM_INFLIGHT.set(key, req);
   return req;
+}
+
+function setSatLru(key: string, img: HTMLImageElement, objectUrl: string) {
+  const prevUrl = SAT_OBJECT_URLS.get(key);
+  if (prevUrl && prevUrl !== objectUrl) {
+    URL.revokeObjectURL(prevUrl);
+  }
+  if (SAT_CACHE.has(key)) SAT_CACHE.delete(key);
+  SAT_CACHE.set(key, img);
+  SAT_OBJECT_URLS.set(key, objectUrl);
+  if (SAT_CACHE.size > MAX_SAT_CACHE) {
+    const oldest = SAT_CACHE.keys().next().value;
+    if (oldest !== undefined) {
+      SAT_CACHE.delete(oldest);
+      const oldUrl = SAT_OBJECT_URLS.get(oldest);
+      if (oldUrl) {
+        URL.revokeObjectURL(oldUrl);
+        SAT_OBJECT_URLS.delete(oldest);
+      }
+    }
+  }
 }
 
 function loadSatelliteTile(z: number, x: number, y: number): Promise<HTMLImageElement | null> {
   const key = `${z}/${x}/${y}`;
   if (SAT_CACHE.has(key)) {
     const val = SAT_CACHE.get(key) ?? null;
-    setLru(SAT_CACHE, key, val, MAX_SAT_CACHE);
+    if (val) {
+      SAT_CACHE.delete(key);
+      SAT_CACHE.set(key, val);
+    }
     return Promise.resolve(val);
   }
   const existing = SAT_INFLIGHT.get(key);
   if (existing) return existing;
 
-  const req = new Promise<HTMLImageElement | null>((resolve) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.decoding = 'async';
-    img.onload = () => {
-      setLru(SAT_CACHE, key, img, MAX_SAT_CACHE);
-      resolve(img);
-    };
-    img.onerror = () => resolve(null);
-    img.src = SENTINEL2_TILE_URL(z, x, y);
-  }).finally(() => {
-    SAT_INFLIGHT.delete(key);
-  });
+  const req = (async (): Promise<HTMLImageElement | null> => {
+    try {
+      const res = await fetchWithOfflineTileCache(SENTINEL2_TILE_URL(z, x, y));
+      if (!res || !res.ok) return null;
+      const blob = await res.blob();
+      const loaded = await decodeBlobToImage(blob);
+      if (!loaded) return null;
+      setSatLru(key, loaded.img, loaded.objectUrl);
+      return loaded.img;
+    } catch {
+      return null;
+    } finally {
+      SAT_INFLIGHT.delete(key);
+    }
+  })();
 
   SAT_INFLIGHT.set(key, req);
   return req;
@@ -890,7 +967,7 @@ const STYLE_PALETTES: Record<MapaStylePreset, StylePalette> = {
     flatLandRgb: [244, 243, 234],
     flatOceanHex: '#A6D5F7',
     oceanDetailHex: '#A8D6F5',
-    hillshadeStrength: 0.27,
+    hillshadeStrength: 0.56,
     landLut: buildLandLut(WORLD_LAND_ATLAS_STOPS),
     oceanLut: buildOceanLut(WORLD_OCEAN_ATLAS_STOPS),
     forestFill: 'rgba(188, 220, 158, 0.64)',
@@ -932,7 +1009,7 @@ const STYLE_PALETTES: Record<MapaStylePreset, StylePalette> = {
     flatLandRgb: [241, 240, 231],
     flatOceanHex: '#94C6EC',
     oceanDetailHex: '#9CCAEF',
-    hillshadeStrength: 0.34,
+    hillshadeStrength: 0.68,
     landLut: buildLandLut(WORLD_LAND_NATURAL_STOPS),
     oceanLut: buildOceanLut(WORLD_OCEAN_NATURAL_STOPS),
     forestFill: 'rgba(176, 212, 146, 0.70)',
@@ -974,7 +1051,7 @@ const STYLE_PALETTES: Record<MapaStylePreset, StylePalette> = {
     flatLandRgb: [246, 245, 240],
     flatOceanHex: '#CCE2F4',
     oceanDetailHex: '#C6DFF4',
-    hillshadeStrength: 0.21,
+    hillshadeStrength: 0.42,
     landLut: buildLandLut(WORLD_LAND_LIGHT_STOPS),
     oceanLut: buildOceanLut(WORLD_OCEAN_LIGHT_STOPS),
     forestFill: 'rgba(200, 226, 174, 0.52)',
@@ -1016,7 +1093,7 @@ const STYLE_PALETTES: Record<MapaStylePreset, StylePalette> = {
     flatLandRgb: [34, 44, 52],
     flatOceanHex: '#101A26',
     oceanDetailHex: '#152538',
-    hillshadeStrength: 0.32,
+    hillshadeStrength: 0.62,
     landLut: DARK_LAND_LUT,
     oceanLut: DARK_OCEAN_LUT,
     forestFill: 'rgba(42, 78, 54, 0.56)',
@@ -1058,7 +1135,7 @@ const STYLE_PALETTES: Record<MapaStylePreset, StylePalette> = {
     flatLandRgb: [30, 44, 36],
     flatOceanHex: '#0F243A',
     oceanDetailHex: '#102A44',
-    hillshadeStrength: 0.24,
+    hillshadeStrength: 0.48,
     landLut: DARK_LAND_LUT,
     oceanLut: DARK_OCEAN_LUT,
     forestFill: 'rgba(46, 86, 58, 0.0)',
@@ -1096,13 +1173,29 @@ const STYLE_PALETTES: Record<MapaStylePreset, StylePalette> = {
 };
 
 // ---------------------------------------------------------------------------
-// Fast DEM Sampling, LUT Hypsometry & Analytical Hillshade
+// High-Definition DEM Sampling, LUT Hypsometry & Swiss Multidirectional Relief Shading
 // ---------------------------------------------------------------------------
-const SUN_ALT = (42 * Math.PI) / 180;
-const SUN_AZ = (315 * Math.PI) / 180;
-const SIN_ALT = Math.sin(SUN_ALT);
-const COS_ALT_COS_AZ = Math.cos(SUN_ALT) * Math.cos(SUN_AZ);
-const COS_ALT_SIN_AZ = Math.cos(SUN_ALT) * Math.sin(SUN_AZ);
+// 4-azimuth NW-biased illumination rig (Eduard Imhof / Swisstopo / USGS multidirectional):
+// Compass azimuths (0°=N, 90°=E, 270°=W, 315°=NW) with +X=East, +Y=South, +Z=Up:
+//   Lx = cos(alt) * sin(az), Ly = -cos(alt) * cos(az), Lz = sin(alt)
+function makeSunVec(azDeg: number, altDeg: number): [number, number, number] {
+  const az = (azDeg * Math.PI) / 180;
+  const alt = (altDeg * Math.PI) / 180;
+  const cosAlt = Math.cos(alt);
+  return [cosAlt * Math.sin(az), -cosAlt * Math.cos(az), Math.sin(alt)];
+}
+
+const [L0X, L0Y, L0Z] = makeSunVec(315, 36); // Primary NW alpine key light
+const [L1X, L1Y, L1Z] = makeSunVec(275, 40); // Secondary WNW cross-ridge fill
+const [L2X, L2Y, L2Z] = makeSunVec(355, 40); // Secondary NNW valley-wall fill
+const [L3X, L3Y, L3Z] = makeSunVec(235, 44); // Soft WSW grazing detail accent
+
+const W0 = 0.52;
+const W1 = 0.22;
+const W2 = 0.18;
+const W3 = 0.08;
+// Exact flat-terrain dot-product baseline so 0° plains produce delta === 0
+const FLAT_MD_SHADE = W0 * L0Z + W1 * L1Z + W2 * L2Z + W3 * L3Z;
 
 // Shared reusable scratch canvas for DEM grid blitting (avoids per-tile DOM allocations)
 let gridScratchCanvas: HTMLCanvasElement | null = null;
@@ -1134,7 +1227,26 @@ function getGridScratch(gridSize: number): {
   };
 }
 
-function sampleDemSubGrid(
+function catmullRom(p0: number, p1: number, p2: number, p3: number, t: number): number {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return (
+    0.5 *
+    (2 * p1 +
+      (-p0 + p2) * t +
+      (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+      (-p0 + 3 * p1 - 3 * p2 + p3) * t3)
+  );
+}
+
+/**
+ * Samples a `(gridSize + 2) x (gridSize + 2)` elevation grid with a 1-cell border halo.
+ * - Uses C¹-continuous Catmull-Rom bicubic interpolation when overzooming (z > demZ)
+ *   to eliminate SRTM pixel grid-line faceting on zoomed-in mountain slopes.
+ * - Reads true cross-border DEM neighbors for sub-tiles and linearly extrapolates at outer
+ *   native DEM tile edges so tile boundaries remain completely seamless.
+ */
+function sampleDemPaddedGrid(
   dem: Float32Array,
   demZ: number,
   demX: number,
@@ -1144,119 +1256,132 @@ function sampleDemSubGrid(
   ty: number,
   gridSize: number
 ): Float32Array {
-  const out = new Float32Array(gridSize * gridSize);
+  const padSize = gridSize + 2;
+  const out = new Float32Array(padSize * padSize);
   const scale = 1 << (z - demZ);
   const subX0 = (tx - demX * scale) / scale;
   const subY0 = (ty - demY * scale) / scale;
   const invGridM1 = 1 / ((gridSize - 1) * scale);
+  const useCubic = z > demZ;
 
-  for (let r = 0; r < gridSize; r++) {
+  for (let pr = 0; pr < padSize; pr++) {
+    const r = pr - 1;
     const v = subY0 + r * invGridM1;
     const fy = v <= 0 ? 0 : v >= 1 ? 255 : v * 255;
-    const y0 = fy | 0;
-    const y1 = y0 < 255 ? y0 + 1 : 255;
-    const wy = fy - y0;
-    const row0 = y0 << 8;
-    const row1 = y1 << 8;
-    const rOffset = r * gridSize;
+    const y1 = fy | 0;
+    const wy = fy - y1;
+    const rowOffset = pr * padSize;
 
-    for (let c = 0; c < gridSize; c++) {
-      const u = subX0 + c * invGridM1;
-      const fx = u <= 0 ? 0 : u >= 1 ? 255 : u * 255;
-      const x0 = fx | 0;
-      const x1 = x0 < 255 ? x0 + 1 : 255;
-      const wx = fx - x0;
+    if (useCubic) {
+      const y0 = y1 > 0 ? y1 - 1 : 0;
+      const y2 = y1 < 255 ? y1 + 1 : 255;
+      const y3 = y1 < 254 ? y1 + 2 : 255;
+      const r0 = y0 << 8;
+      const r1 = y1 << 8;
+      const r2 = y2 << 8;
+      const r3 = y3 << 8;
 
-      const e00 = dem[row0 + x0];
-      const e10 = dem[row0 + x1];
-      const e01 = dem[row1 + x0];
-      const e11 = dem[row1 + x1];
-      const top = e00 + (e10 - e00) * wx;
-      const bot = e01 + (e11 - e01) * wx;
-      out[rOffset + c] = top + (bot - top) * wy;
+      for (let pc = 0; pc < padSize; pc++) {
+        const c = pc - 1;
+        const u = subX0 + c * invGridM1;
+        const fx = u <= 0 ? 0 : u >= 1 ? 255 : u * 255;
+        const x1 = fx | 0;
+        const wx = fx - x1;
+        const x0 = x1 > 0 ? x1 - 1 : 0;
+        const x2 = x1 < 255 ? x1 + 1 : 255;
+        const x3 = x1 < 254 ? x1 + 2 : 255;
+
+        const c0 = catmullRom(dem[r0 + x0], dem[r0 + x1], dem[r0 + x2], dem[r0 + x3], wx);
+        const c1 = catmullRom(dem[r1 + x0], dem[r1 + x1], dem[r1 + x2], dem[r1 + x3], wx);
+        const c2 = catmullRom(dem[r2 + x0], dem[r2 + x1], dem[r2 + x2], dem[r2 + x3], wx);
+        const c3 = catmullRom(dem[r3 + x0], dem[r3 + x1], dem[r3 + x2], dem[r3 + x3], wx);
+        out[rowOffset + pc] = catmullRom(c0, c1, c2, c3, wy);
+      }
+    } else {
+      const y2 = y1 < 255 ? y1 + 1 : 255;
+      const r1 = y1 << 8;
+      const r2 = y2 << 8;
+
+      for (let pc = 0; pc < padSize; pc++) {
+        const c = pc - 1;
+        const u = subX0 + c * invGridM1;
+        const fx = u <= 0 ? 0 : u >= 1 ? 255 : u * 255;
+        const x1 = fx | 0;
+        const x2 = x1 < 255 ? x1 + 1 : 255;
+        const wx = fx - x1;
+
+        const e00 = dem[r1 + x1];
+        const e10 = dem[r1 + x2];
+        const e01 = dem[r2 + x1];
+        const e11 = dem[r2 + x2];
+        const top = e00 + (e10 - e00) * wx;
+        const bot = e01 + (e11 - e01) * wx;
+        out[rowOffset + pc] = top + (bot - top) * wy;
+      }
     }
   }
+
+  // Linearly extrapolate halo cells that clamped at the outer native DEM tile border
+  // so edge derivatives preserve exact slope instead of halving and creating tile seams
+  const clampedTop = subY0 - invGridM1 < 0;
+  const clampedBot = subY0 + gridSize * invGridM1 > 1;
+  const clampedLeft = subX0 - invGridM1 < 0;
+  const clampedRight = subX0 + gridSize * invGridM1 > 1;
+
+  if (clampedLeft) {
+    for (let pr = 0; pr < padSize; pr++) {
+      const base = pr * padSize;
+      out[base] = 2 * out[base + 1] - out[base + 2];
+    }
+  }
+  if (clampedRight) {
+    for (let pr = 0; pr < padSize; pr++) {
+      const base = pr * padSize;
+      out[base + padSize - 1] = 2 * out[base + padSize - 2] - out[base + padSize - 3];
+    }
+  }
+  if (clampedTop) {
+    for (let pc = 0; pc < padSize; pc++) {
+      out[pc] = 2 * out[padSize + pc] - out[2 * padSize + pc];
+    }
+  }
+  if (clampedBot) {
+    const last = (padSize - 1) * padSize;
+    const prev1 = (padSize - 2) * padSize;
+    const prev2 = (padSize - 3) * padSize;
+    for (let pc = 0; pc < padSize; pc++) {
+      out[last + pc] = 2 * out[prev1 + pc] - out[prev2 + pc];
+    }
+  }
+
   return out;
 }
 
-function paintHypsometryAndHillshade(
+function paintHypsometryBase(
   ctx: CanvasRenderingContext2D,
-  elevGrid: Float32Array,
+  elevPadded: Float32Array,
   gridSize: number,
-  z: number,
-  ty: number,
-  pal: StylePalette,
-  enableHypsometry: boolean,
-  enableHillshade: boolean
+  pal: StylePalette
 ) {
   const scratch = getGridScratch(gridSize);
   if (!scratch) return;
 
   const data = scratch.imgData.data;
   const landLut = pal.landLut;
-  const flatR = pal.flatLandRgb[0];
-  const flatG = pal.flatLandRgb[1];
-  const flatB = pal.flatLandRgb[2];
-
-  const n = 1 << z;
-  const mercY = Math.PI * (1 - (2 * (ty + 0.5)) / n);
-  const latRad = Math.atan(Math.sinh(mercY));
-  const tileMeters = (40075016.686 * Math.max(0.2, Math.cos(latRad))) / n;
-  const cellMeters = tileMeters / Math.max(1, gridSize - 1);
-  const zExag = z >= 12 ? 1.55 : z >= 9 ? 2.1 : 2.8;
-  const gradFactor = zExag / (2 * cellMeters);
-  const shadeMult = pal.hillshadeStrength * 1.6;
+  const padSize = gridSize + 2;
 
   for (let r = 0; r < gridSize; r++) {
-    const rUp = (r > 0 ? r - 1 : 0) * gridSize;
-    const rDn = (r < gridSize - 1 ? r + 1 : gridSize - 1) * gridSize;
-    const rCur = r * gridSize;
-
+    const padRow = (r + 1) * padSize + 1;
+    const outRow = r * gridSize;
     for (let c = 0; c < gridSize; c++) {
-      const idx = rCur + c;
-      const rawElev = elevGrid[idx];
+      const rawElev = elevPadded[padRow + c];
       const landElev = rawElev > 0 ? rawElev : 0;
-
-      let baseR: number;
-      let baseG: number;
-      let baseB: number;
-      if (enableHypsometry) {
-        const lutIdx =
-          (landElev >= LUT_MAX_LAND_M ? LUT_MAX_LAND_M : (landElev + 0.5) | 0) * 3;
-        baseR = landLut[lutIdx];
-        baseG = landLut[lutIdx + 1];
-        baseB = landLut[lutIdx + 2];
-      } else {
-        baseR = flatR;
-        baseG = flatG;
-        baseB = flatB;
-      }
-
-      let shadeFactor = 1;
-      if (enableHillshade && landElev > 0.5) {
-        const cLt = c > 0 ? c - 1 : 0;
-        const cRt = c < gridSize - 1 ? c + 1 : gridSize - 1;
-        const eLt = elevGrid[rCur + cLt] > 0 ? elevGrid[rCur + cLt] : 0;
-        const eRt = elevGrid[rCur + cRt] > 0 ? elevGrid[rCur + cRt] : 0;
-        const eUp = elevGrid[rUp + c] > 0 ? elevGrid[rUp + c] : 0;
-        const eDn = elevGrid[rDn + c] > 0 ? elevGrid[rDn + c] : 0;
-
-        const dzdx = (eRt - eLt) * gradFactor;
-        const dzdy = (eDn - eUp) * gradFactor;
-        // Analytical normal dot product (replaces atan + atan2 + 3 sin/cos calls)
-        const hs =
-          (SIN_ALT - dzdx * COS_ALT_COS_AZ - dzdy * COS_ALT_SIN_AZ) /
-          Math.sqrt(1 + dzdx * dzdx + dzdy * dzdy);
-        shadeFactor = 1 + (hs - 0.67) * shadeMult;
-      }
-
-      const p = idx << 2;
-      const rOut = (baseR * shadeFactor + 0.5) | 0;
-      const gOut = (baseG * shadeFactor + 0.5) | 0;
-      const bOut = (baseB * shadeFactor + 0.5) | 0;
-      data[p] = rOut < 0 ? 0 : rOut > 255 ? 255 : rOut;
-      data[p + 1] = gOut < 0 ? 0 : gOut > 255 ? 255 : gOut;
-      data[p + 2] = bOut < 0 ? 0 : bOut > 255 ? 255 : bOut;
+      const lutIdx =
+        (landElev >= LUT_MAX_LAND_M ? LUT_MAX_LAND_M : (landElev + 0.5) | 0) * 3;
+      const p = (outRow + c) << 2;
+      data[p] = landLut[lutIdx];
+      data[p + 1] = landLut[lutIdx + 1];
+      data[p + 2] = landLut[lutIdx + 2];
       data[p + 3] = 255;
     }
   }
@@ -1266,63 +1391,152 @@ function paintHypsometryAndHillshade(
   ctx.drawImage(scratch.canvas, 0, 0, TILE_LOGICAL_PX, TILE_LOGICAL_PX);
 }
 
-function paintSatelliteHillshadeOverlay(
+/**
+ * High-definition Swiss / Eduard Imhof Multidirectional Relief Shading overlay.
+ * Composited OVER hypsometry and landcover (forests, meadows, rocks, urban) and UNDER
+ * contours, hydrology, roads, and labels so forested mountain ranges display crisp 3D relief.
+ *
+ * Combines:
+ * 1. Horn 3×3 weighted Sobel terrain gradients (smooth, artifact-free normals)
+ * 2. 4-azimuth NW-biased multidirectional illumination (sculpts ridges at every orientation)
+ * 3. Steep-slope structural accent (Imhof ridge & gorge clarity)
+ * 4. Local topographic curvature / valley ambient occlusion (deepens valleys, lifts crests)
+ * 5. Elevation-modulated aerial perspective & warm-sun / cool-shadow chromatic tinting
+ */
+function paintReliefShadingOverlay(
   ctx: CanvasRenderingContext2D,
-  elevGrid: Float32Array,
+  elevPadded: Float32Array,
   gridSize: number,
   z: number,
-  ty: number
+  ty: number,
+  pal: StylePalette
 ) {
   const scratch = getGridScratch(gridSize);
   if (!scratch) return;
 
   const data = scratch.imgData.data;
+  const padSize = gridSize + 2;
+
   const n = 1 << z;
   const mercY = Math.PI * (1 - (2 * (ty + 0.5)) / n);
   const latRad = Math.atan(Math.sinh(mercY));
   const tileMeters = (40075016.686 * Math.max(0.2, Math.cos(latRad))) / n;
   const cellMeters = tileMeters / Math.max(1, gridSize - 1);
-  const zExag = z >= 12 ? 1.5 : 2.0;
-  const gradFactor = zExag / (2 * cellMeters);
+
+  // Zoom-adaptive vertical exaggeration: strong macro relief at regional zooms, crisp natural relief at hiking zooms
+  const zExag =
+    z >= 15 ? 1.45 :
+    z >= 13 ? 1.75 :
+    z >= 11 ? 2.15 :
+    z >= 9  ? 2.85 :
+    z >= 7  ? 3.8  : 4.8;
+
+  // Horn 3×3 kernel divisor is 8 * cellMeters
+  const hornFactor = zExag / (8 * cellMeters);
+  // Curvature normalization factor for valley AO & ridge crest highlight
+  const curvFactor = zExag / Math.max(8, cellMeters * 0.85);
+
+  const strength = pal.hillshadeStrength;
+
+  // Style-specific warm-sunlit highlight & cool atmospheric shadow RGB tints
+  const hiR = pal.isSatellite ? 255 : pal.isDark ? 188 : 255;
+  const hiG = pal.isSatellite ? 246 : pal.isDark ? 216 : 249;
+  const hiB = pal.isSatellite ? 218 : pal.isDark ? 244 : 224;
+
+  const shR = pal.isSatellite ? 7 : pal.isDark ? 4 : 34;
+  const shG = pal.isSatellite ? 14 : pal.isDark ? 9 : 48;
+  const shB = pal.isSatellite ? 28 : pal.isDark ? 18 : 76;
+
+  const hiGain = (pal.isSatellite ? 165 : pal.isDark ? 140 : 120) * strength;
+  const shGain = (pal.isSatellite ? 275 : pal.isDark ? 295 : 280) * strength;
+  const maxHiAlpha = pal.isSatellite ? 72 : pal.isDark ? 72 : 62;
+  const maxShAlpha = pal.isSatellite ? 132 : pal.isDark ? 158 : 156;
 
   for (let r = 0; r < gridSize; r++) {
-    const rUp = (r > 0 ? r - 1 : 0) * gridSize;
-    const rDn = (r < gridSize - 1 ? r + 1 : gridSize - 1) * gridSize;
-    const rCur = r * gridSize;
+    const r0 = r * padSize;
+    const r1 = (r + 1) * padSize;
+    const r2 = (r + 2) * padSize;
+    const outRow = r * gridSize;
 
     for (let c = 0; c < gridSize; c++) {
-      const idx = rCur + c;
-      const landElev = elevGrid[idx] > 0 ? elevGrid[idx] : 0;
-      const p = idx << 2;
-      if (landElev <= 1) {
+      const p = (outRow + c) << 2;
+      const eC = elevPadded[r1 + c + 1];
+      if (eC <= 0.5) {
         data[p + 3] = 0;
         continue;
       }
-      const cLt = c > 0 ? c - 1 : 0;
-      const cRt = c < gridSize - 1 ? c + 1 : gridSize - 1;
-      const eLt = elevGrid[rCur + cLt] > 0 ? elevGrid[rCur + cLt] : 0;
-      const eRt = elevGrid[rCur + cRt] > 0 ? elevGrid[rCur + cRt] : 0;
-      const eUp = elevGrid[rUp + c] > 0 ? elevGrid[rUp + c] : 0;
-      const eDn = elevGrid[rDn + c] > 0 ? elevGrid[rDn + c] : 0;
 
-      const dzdx = (eRt - eLt) * gradFactor;
-      const dzdy = (eDn - eUp) * gradFactor;
-      const hs =
-        (SIN_ALT - dzdx * COS_ALT_COS_AZ - dzdy * COS_ALT_SIN_AZ) /
-        Math.sqrt(1 + dzdx * dzdx + dzdy * dzdy);
-      const delta = hs - 0.67;
+      // Clamp negative ocean shelf values to sea level at coastlines to prevent coastal cliff rings
+      const eNW = elevPadded[r0 + c] > 0 ? elevPadded[r0 + c] : 0;
+      const eN = elevPadded[r0 + c + 1] > 0 ? elevPadded[r0 + c + 1] : 0;
+      const eNE = elevPadded[r0 + c + 2] > 0 ? elevPadded[r0 + c + 2] : 0;
+      const eW = elevPadded[r1 + c] > 0 ? elevPadded[r1 + c] : 0;
+      const eE = elevPadded[r1 + c + 2] > 0 ? elevPadded[r1 + c + 2] : 0;
+      const eSW = elevPadded[r2 + c] > 0 ? elevPadded[r2 + c] : 0;
+      const eS = elevPadded[r2 + c + 1] > 0 ? elevPadded[r2 + c + 1] : 0;
+      const eSE = elevPadded[r2 + c + 2] > 0 ? elevPadded[r2 + c + 2] : 0;
+
+      // Horn's 3×3 weighted terrain gradient
+      const dzdx = (eNE + 2 * eE + eSE - (eNW + 2 * eW + eSW)) * hornFactor;
+      const dzdy = (eSW + 2 * eS + eSE - (eNW + 2 * eN + eNE)) * hornFactor;
+
+      const slopeSq = dzdx * dzdx + dzdy * dzdy;
+      const invLen = 1 / Math.sqrt(1 + slopeSq);
+
+      // 4-azimuth multidirectional dot products: N = (-dzdx, -dzdy, 1) * invLen
+      const d0 = (-dzdx * L0X - dzdy * L0Y + L0Z) * invLen;
+      const d1 = (-dzdx * L1X - dzdy * L1Y + L1Z) * invLen;
+      const d2 = (-dzdx * L2X - dzdy * L2Y + L2Z) * invLen;
+      const d3 = (-dzdx * L3X - dzdy * L3Y + L3Z) * invLen;
+
+      const h0 = d0 > 0 ? d0 : 0;
+      const h1 = d1 > 0 ? d1 : 0;
+      const h2 = d2 > 0 ? d2 : 0;
+      const h3 = d3 > 0 ? d3 : 0;
+      const mdShade = W0 * h0 + W1 * h1 + W2 * h2 + W3 * h3;
+
+      // Imhof slope-steepness structural accent
+      const steepness = 1 - invLen;
+
+      // Local topographic curvature (convex ridges > 0, concave valleys/gullies < 0)
+      const avg8 = (eNW + eN + eNE + eW + eE + eSW + eS + eSE) * 0.125;
+      const rawCurv = (eC - avg8) * curvFactor;
+      const curvSignal = (rawCurv / (1 + Math.abs(rawCurv))) * 0.15;
+
+      // Combined relief signal
+      const delta = mdShade - FLAT_MD_SHADE - steepness * 0.24 + curvSignal;
+
+      // Smoothly suppress shading on dead-flat lowlands so plains & cities stay crisp
+      const slopeMag = Math.sqrt(slopeSq);
+      const flatMask = Math.min(1, slopeMag * 8.5 + Math.abs(curvSignal) * 3.5);
+
+      // Aerial perspective contrast lift on higher mountain ranges
+      const elevBoost = 1 + Math.min(0.28, eC / 2600);
+
       if (delta >= 0) {
-        data[p] = 255;
-        data[p + 1] = 252;
-        data[p + 2] = 240;
-        const a = (delta * 165) | 0;
-        data[p + 3] = a > 72 ? 72 : a;
+        // Soft shoulder curve lifts gentle sunlit hills without blowing out alpine peaks
+        const shaped = delta / (0.62 + 0.38 * delta);
+        const alpha = (shaped * hiGain * flatMask * elevBoost) | 0;
+        if (alpha <= 1) {
+          data[p + 3] = 0;
+        } else {
+          data[p] = hiR;
+          data[p + 1] = hiG;
+          data[p + 2] = hiB;
+          data[p + 3] = alpha > maxHiAlpha ? maxHiAlpha : alpha;
+        }
       } else {
-        data[p] = 8;
-        data[p + 1] = 14;
-        data[p + 2] = 24;
-        const a = (-delta * 195) | 0;
-        data[p + 3] = a > 96 ? 96 : a;
+        const neg = -delta;
+        const shaped = neg / (0.68 + 0.32 * neg);
+        const alpha = (shaped * shGain * flatMask * elevBoost) | 0;
+        if (alpha <= 1) {
+          data[p + 3] = 0;
+        } else {
+          data[p] = shR;
+          data[p + 1] = shG;
+          data[p + 2] = shB;
+          data[p + 3] = alpha > maxShAlpha ? maxShAlpha : alpha;
+        }
       }
     }
   }
@@ -1336,7 +1550,7 @@ function paintSatelliteHillshadeOverlay(
 
 function paintClippedOceanBathymetry(
   ctx: CanvasRenderingContext2D,
-  elevGrid: Float32Array,
+  elevPadded: Float32Array,
   gridSize: number,
   pal: StylePalette
 ) {
@@ -1345,17 +1559,21 @@ function paintClippedOceanBathymetry(
 
   const data = scratch.imgData.data;
   const oceanLut = pal.oceanLut;
-  const count = gridSize * gridSize;
+  const padSize = gridSize + 2;
 
-  for (let i = 0; i < count; i++) {
-    const raw = elevGrid[i];
-    const depth = raw >= 0 ? 0 : raw <= LUT_MIN_OCEAN_M ? LUT_MIN_OCEAN_M : raw | 0;
-    const lutIdx = (depth - LUT_MIN_OCEAN_M) * 3;
-    const p = i << 2;
-    data[p] = oceanLut[lutIdx];
-    data[p + 1] = oceanLut[lutIdx + 1];
-    data[p + 2] = oceanLut[lutIdx + 2];
-    data[p + 3] = 255;
+  for (let r = 0; r < gridSize; r++) {
+    const padRow = (r + 1) * padSize + 1;
+    const outRow = r * gridSize;
+    for (let c = 0; c < gridSize; c++) {
+      const raw = elevPadded[padRow + c];
+      const depth = raw >= 0 ? 0 : raw <= LUT_MIN_OCEAN_M ? LUT_MIN_OCEAN_M : raw | 0;
+      const lutIdx = (depth - LUT_MIN_OCEAN_M) * 3;
+      const p = (outRow + c) << 2;
+      data[p] = oceanLut[lutIdx];
+      data[p + 1] = oceanLut[lutIdx + 1];
+      data[p + 2] = oceanLut[lutIdx + 2];
+      data[p + 3] = 255;
+    }
   }
 
   scratch.ctx.putImageData(scratch.imgData, 0, 0);
@@ -1368,7 +1586,7 @@ function paintClippedOceanBathymetry(
  */
 function paintContoursFromGrid(
   ctx: CanvasRenderingContext2D,
-  elevGrid: Float32Array,
+  elevPadded: Float32Array,
   gridSize: number,
   z: number,
   pal: StylePalette
@@ -1377,13 +1595,17 @@ function paintContoursFromGrid(
 
   const stepM = z >= 15 ? 10 : z >= 13 ? 20 : z >= 11 ? 50 : z >= 9 ? 100 : 200;
   const majorStepM = stepM * 5;
+  const padSize = gridSize + 2;
 
   let minE = Infinity;
   let maxE = -Infinity;
-  for (let i = 0; i < elevGrid.length; i++) {
-    const e = elevGrid[i];
-    if (e > 5 && e < minE) minE = e;
-    if (e > maxE) maxE = e;
+  for (let r = 0; r < gridSize; r++) {
+    const padRow = (r + 1) * padSize + 1;
+    for (let c = 0; c < gridSize; c++) {
+      const e = elevPadded[padRow + c];
+      if (e > 5 && e < minE) minE = e;
+      if (e > maxE) maxE = e;
+    }
   }
   if (!isFinite(minE) || maxE <= 5) return;
 
@@ -1400,14 +1622,14 @@ function paintContoursFromGrid(
   for (let r = 0; r < gridSize - 1; r++) {
     const y0 = r * pxStep;
     const y1 = (r + 1) * pxStep;
-    const row0 = r * gridSize;
-    const row1 = (r + 1) * gridSize;
+    const row0 = (r + 1) * padSize + 1;
+    const row1 = (r + 2) * padSize + 1;
 
     for (let c = 0; c < gridSize - 1; c++) {
-      const v0 = elevGrid[row0 + c];
-      const v1 = elevGrid[row0 + c + 1];
-      const v2 = elevGrid[row1 + c + 1];
-      const v3 = elevGrid[row1 + c];
+      const v0 = elevPadded[row0 + c];
+      const v1 = elevPadded[row0 + c + 1];
+      const v2 = elevPadded[row1 + c + 1];
+      const v3 = elevPadded[row1 + c];
 
       const cMin = Math.min(v0, v1, v2, v3);
       const cMax = Math.max(v0, v1, v2, v3);
@@ -2327,13 +2549,13 @@ function executeTilePaintPass(
   ctx.fillStyle = pal.bg;
   ctx.fillRect(0, 0, TILE_LOGICAL_PX, TILE_LOGICAL_PX);
 
-  const gridSize = z >= 11 ? 65 : 49;
-  let elevGrid: Float32Array | null = null;
+  const gridSize = z >= 11 ? 113 : z >= 8 ? 81 : 65;
+  let elevPadded: Float32Array | null = null;
   if (demRaw) {
-    elevGrid = sampleDemSubGrid(demRaw, demZ, demX, demY, z, wrappedX, ty, gridSize);
+    elevPadded = sampleDemPaddedGrid(demRaw, demZ, demX, demY, z, wrappedX, ty, gridSize);
   }
 
-  // Pass 0: Base terrain or Sentinel-2 satellite imagery
+  // Pass 0: Base terrain hypsometry or Sentinel-2 satellite imagery
   if (pal.isSatellite && satImg) {
     const satScale = 1 << satShift;
     const subX = (wrappedX - satX * satScale) / satScale;
@@ -2352,38 +2574,31 @@ function executeTilePaintPass(
       TILE_LOGICAL_PX,
       TILE_LOGICAL_PX
     );
-    if (elevGrid && layers.hillshade) {
-      paintSatelliteHillshadeOverlay(ctx, elevGrid, gridSize, z, ty);
-    }
-  } else if (elevGrid && (layers.hypsometry || layers.hillshade)) {
-    paintHypsometryAndHillshade(
-      ctx,
-      elevGrid,
-      gridSize,
-      z,
-      ty,
-      pal,
-      layers.hypsometry,
-      layers.hillshade
-    );
+  } else if (elevPadded && layers.hypsometry) {
+    paintHypsometryBase(ctx, elevPadded, gridSize, pal);
   } else {
     ctx.fillStyle = `rgb(${pal.flatLandRgb[0]}, ${pal.flatLandRgb[1]}, ${pal.flatLandRgb[2]})`;
     ctx.fillRect(0, 0, TILE_LOGICAL_PX, TILE_LOGICAL_PX);
   }
 
-  // Pass 1: Forests, parks, urban landuse, buildings (under contours)
+  // Pass 1: Forests, meadows, parks, urban landuse, buildings (under relief shading & contours)
   if (vt) {
     paintVectorBase(ctx, vt, z, xf, pal, layers);
   }
 
+  // Pass 1.5: Swiss multidirectional relief shading (sculpts both hypsometry & landcover)
+  if (elevPadded && layers.hillshade) {
+    paintReliefShadingOverlay(ctx, elevPadded, gridSize, z, ty, pal);
+  }
+
   // Pass 2: Adaptive elevation contours (10–200 m)
-  if (elevGrid && layers.contours) {
-    paintContoursFromGrid(ctx, elevGrid, gridSize, z, pal);
+  if (elevPadded && layers.contours) {
+    paintContoursFromGrid(ctx, elevPadded, gridSize, z, pal);
   }
 
   // Pass 3: Oceans/water, rivers, borders, districts, railways, roads & labels
   if (vt) {
-    paintVectorOverlay(ctx, vt, z, xf, elevGrid, gridSize, pal, layers);
+    paintVectorOverlay(ctx, vt, z, xf, elevPadded, gridSize, pal, layers);
     paintVectorLabels(ctx, vt, z, xf, pal, layers);
   }
 

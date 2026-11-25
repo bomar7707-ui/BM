@@ -76,7 +76,7 @@ interface Terrain3DMapProps {
 }
 
 // Grid resolution of the 3D diorama top surface
-const GRID_SEGMENTS = 144;
+const GRID_SEGMENTS = 192;
 const GRID_VERTS = GRID_SEGMENTS + 1;
 const DIORAMA_MAX_SIZE = 100; // World units for the longest horizontal edge
 const BASE_SOIL_THICKNESS = 4.2; // Minimum height of the vertical diorama cut-out wall
@@ -275,10 +275,12 @@ async function fetchDioramaMapCanvas(
   const cropH = Math.max(16, (exactY1 - exactY0) * 256);
 
   const finalCanvas = document.createElement('canvas');
-  finalCanvas.width = 1024;
-  finalCanvas.height = 1024;
+  finalCanvas.width = 1536;
+  finalCanvas.height = 1536;
   const fCtx = finalCanvas.getContext('2d')!;
-  fCtx.drawImage(stitchCanvas, cropX, cropY, cropW, cropH, 0, 0, 1024, 1024);
+  fCtx.imageSmoothingEnabled = true;
+  fCtx.imageSmoothingQuality = 'high';
+  fCtx.drawImage(stitchCanvas, cropX, cropY, cropW, cropH, 0, 0, 1536, 1536);
 
   return finalCanvas;
 }
@@ -287,7 +289,7 @@ async function fetchDioramaMapCanvas(
 async function fetchDioramaElevationGrid(
   bounds: DioramaBounds,
   fallbackCoords: Coordinate[]
-): Promise<{ heights: Float32Array; minEle: number; maxEle: number }> {
+): Promise<{ heights: Float32Array; rawHeights: Float32Array; minEle: number; maxEle: number }> {
   const z = pickOptimalZoom(bounds, 13);
   const exactX0 = lonToTileX(bounds.minLon, z);
   const exactX1 = lonToTileX(bounds.maxLon, z);
@@ -406,9 +408,9 @@ async function fetchDioramaElevationGrid(
     }
   }
 
-  // Smooth the elevation grid (2 passes of 3x3 Gaussian-like kernel) so the 3D diorama mesh is silky smooth
+  // Light single-pass Gaussian smoothing (center weight 6) removes SRTM quantization steps while keeping mountain crests crisp
   let current = rawGrid;
-  for (let pass = 0; pass < 2; pass++) {
+  {
     const next = new Float32Array(GRID_VERTS * GRID_VERTS);
     for (let iz = 0; iz < GRID_VERTS; iz++) {
       for (let ix = 0; ix < GRID_VERTS; ix++) {
@@ -418,7 +420,7 @@ async function fetchDioramaElevationGrid(
           for (let dx = -1; dx <= 1; dx++) {
             const nz = Math.max(0, Math.min(GRID_SEGMENTS, iz + dz));
             const nx = Math.max(0, Math.min(GRID_SEGMENTS, ix + dx));
-            const w = dz === 0 && dx === 0 ? 4 : dz === 0 || dx === 0 ? 2 : 1;
+            const w = dz === 0 && dx === 0 ? 6 : dz === 0 || dx === 0 ? 2 : 1;
             sum += current[nz * GRID_VERTS + nx] * w;
             weightSum += w;
           }
@@ -440,7 +442,121 @@ async function fetchDioramaElevationGrid(
     maxEle = 800;
   }
 
-  return { heights: current, minEle, maxEle };
+  return { heights: current, rawHeights: rawGrid, minEle, maxEle };
+}
+
+/**
+ * Generates procedural per-pixel Tangent-Space Micro-Relief Normal Map (from the
+ * high-frequency DEM residual so displaced geometric vertex normals are never double-rotated)
+ * and Multi-Scale Valley Ambient Occlusion Map for sculptural 3D relief shading.
+ */
+function buildTerrainReliefMaps(
+  heights: Float32Array,
+  rawHeights: Float32Array,
+  bounds: DioramaBounds,
+  exaggeration: number
+): { normalMap: THREE.DataTexture; aoMap: THREE.DataTexture } {
+  const size = GRID_VERTS;
+  const normalData = new Uint8Array(size * size * 4);
+  const aoData = new Uint8Array(size * size * 4);
+
+  const stepX = bounds.worldWidth / GRID_SEGMENTS;
+  const stepZ = bounds.worldDepth / GRID_SEGMENTS;
+  const heightScale = bounds.metersToWorld * exaggeration;
+  const inv8X = heightScale / (8 * stepX);
+  const inv8Z = heightScale / (8 * stepZ);
+
+  const sampleH = (arr: Float32Array, ix: number, iz: number): number => {
+    const cx = ix < 0 ? 0 : ix >= size ? size - 1 : ix;
+    const cz = iz < 0 ? 0 : iz >= size ? size - 1 : iz;
+    return arr[cz * size + cx];
+  };
+
+  for (let iz = 0; iz < size; iz++) {
+    for (let ix = 0; ix < size; ix++) {
+      const idx = (iz * size + ix) * 4;
+      const hC = sampleH(heights, ix, iz);
+
+      // High-frequency micro-relief residual (raw DEM minus smoothed mesh) + subtle crease sharpening
+      const d = (dx: number, dz: number) => {
+        const raw = sampleH(rawHeights, ix + dx, iz + dz);
+        const sm = sampleH(heights, ix + dx, iz + dz);
+        return (raw - sm) * 1.45 + sm * 0.14;
+      };
+
+      const dNW = d(-1, -1);
+      const dN = d(0, -1);
+      const dNE = d(1, -1);
+      const dW = d(-1, 0);
+      const dE = d(1, 0);
+      const dSW = d(-1, 1);
+      const dS = d(0, 1);
+      const dSE = d(1, 1);
+
+      // PlaneGeometry rotated -PI/2 around X has +T = East (+ix) and +B = North (-iz)
+      const dYdEast = (dNE + 2 * dE + dSE - (dNW + 2 * dW + dSW)) * inv8X;
+      const dYdNorth = (dNW + 2 * dN + dNE - (dSW + 2 * dS + dSE)) * inv8Z;
+
+      const nxRaw = -dYdEast;
+      const nyRaw = -dYdNorth;
+      const nzRaw = 1;
+      const invLen = 1 / Math.sqrt(nxRaw * nxRaw + nyRaw * nyRaw + nzRaw * nzRaw);
+
+      normalData[idx] = Math.round((nxRaw * invLen * 0.5 + 0.5) * 255);
+      normalData[idx + 1] = Math.round((nyRaw * invLen * 0.5 + 0.5) * 255);
+      normalData[idx + 2] = Math.round((nzRaw * invLen * 0.5 + 0.5) * 255);
+      normalData[idx + 3] = 255;
+
+      // Multi-scale valley ambient occlusion (short radius 2 + medium radius 6)
+      const avgNear =
+        (sampleH(heights, ix - 2, iz) +
+          sampleH(heights, ix + 2, iz) +
+          sampleH(heights, ix, iz - 2) +
+          sampleH(heights, ix, iz + 2) +
+          sampleH(heights, ix - 2, iz - 2) +
+          sampleH(heights, ix + 2, iz - 2) +
+          sampleH(heights, ix - 2, iz + 2) +
+          sampleH(heights, ix + 2, iz + 2)) *
+        0.125;
+
+      const avgWide =
+        (sampleH(heights, ix - 6, iz) +
+          sampleH(heights, ix + 6, iz) +
+          sampleH(heights, ix, iz - 6) +
+          sampleH(heights, ix, iz + 6) +
+          sampleH(heights, ix - 4, iz - 4) +
+          sampleH(heights, ix + 4, iz - 4) +
+          sampleH(heights, ix - 4, iz + 4) +
+          sampleH(heights, ix + 4, iz + 4)) *
+        0.125;
+
+      const cavityNear = Math.max(0, (avgNear - hC) * heightScale) / (stepX * 2.2);
+      const cavityWide = Math.max(0, (avgWide - hC) * heightScale) / (stepX * 5.5);
+      const occlusion = Math.min(0.62, cavityNear * 0.42 + cavityWide * 0.55);
+      const aoByte = Math.round((1 - occlusion) * 255);
+
+      aoData[idx] = aoByte;
+      aoData[idx + 1] = aoByte;
+      aoData[idx + 2] = aoByte;
+      aoData[idx + 3] = 255;
+    }
+  }
+
+  const normalMap = new THREE.DataTexture(normalData, size, size, THREE.RGBAFormat);
+  normalMap.colorSpace = THREE.NoColorSpace;
+  normalMap.flipY = true;
+  normalMap.minFilter = THREE.LinearFilter;
+  normalMap.magFilter = THREE.LinearFilter;
+  normalMap.needsUpdate = true;
+
+  const aoMap = new THREE.DataTexture(aoData, size, size, THREE.RGBAFormat);
+  aoMap.colorSpace = THREE.NoColorSpace;
+  aoMap.flipY = true;
+  aoMap.minFilter = THREE.LinearFilter;
+  aoMap.magFilter = THREE.LinearFilter;
+  aoMap.needsUpdate = true;
+
+  return { normalMap, aoMap };
 }
 
 // Build geological cross-section side walls + bottom base for the 3D diorama block
@@ -618,6 +734,7 @@ export const Terrain3DMap = forwardRef<Terrain3DMapHandle, Terrain3DMapProps>(
     const dioramaDataRef = useRef<{
       bounds: DioramaBounds;
       heights: Float32Array;
+      rawHeights: Float32Array;
       minEle: number;
       maxEle: number;
     } | null>(null);
@@ -1007,22 +1124,32 @@ export const Terrain3DMap = forwardRef<Terrain3DMapHandle, Terrain3DMapProps>(
       camera.position.set(22, 68, 95);
       cameraRef.current = camera;
 
+      const isSoftwareGl = (() => {
+        const probe = document.createElement('canvas').getContext('webgl2');
+        if (!probe) return true;
+        const ext = probe.getExtension('WEBGL_debug_renderer_info');
+        const param = ext ? ext.UNMASKED_RENDERER_WEBGL : probe.RENDERER;
+        const gpu = String(probe.getParameter(param));
+        probe.getExtension('WEBGL_lose_context')?.loseContext();
+        return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
+      })();
+
       const renderer = new THREE.WebGLRenderer({
-        antialias: true,
+        antialias: !isSoftwareGl,
         powerPreference: 'high-performance',
       });
       renderer.setSize(width, height);
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
       renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.08;
-      renderer.shadowMap.enabled = true;
+      renderer.toneMappingExposure = 1.02;
+      renderer.shadowMap.enabled = !isSoftwareGl;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       container.appendChild(renderer.domElement);
       rendererRef.current = renderer;
 
       const controls = new OrbitControls(camera, renderer.domElement);
-      controls.enableDamping = true;
+      controls.enableDamping = !isSoftwareGl;
       controls.dampingFactor = 0.07;
       controls.maxPolarAngle = Math.PI / 2 - 0.04; // Never dip below the diorama base table
       controls.minPolarAngle = 0.12;
@@ -1042,27 +1169,30 @@ export const Terrain3DMap = forwardRef<Terrain3DMapHandle, Terrain3DMapProps>(
       };
       controls.addEventListener('start', handleControlStart);
 
-      // Studio lighting for crisp 3D relief shading
-      const ambientLight = new THREE.HemisphereLight('#f8fafc', '#334155', 1.15);
+      // Balanced 3-point alpine lighting rig: rich saturated map colors + deep sculptural relief shadows
+      const ambientLight = new THREE.HemisphereLight('#dbeafe', '#1e293b', 0.78);
       scene.add(ambientLight);
 
-      const sunLight = new THREE.DirectionalLight('#fffbeb', 1.65);
-      sunLight.position.set(-65, 95, 55);
-      sunLight.castShadow = true;
+      const sunLight = new THREE.DirectionalLight('#fff8eb', 1.75);
+      sunLight.position.set(-80, 72, -28); // WNW/NW alpine sun casting sculptural SE valley shadows
+      sunLight.castShadow = !isSoftwareGl;
       sunLight.shadow.mapSize.width = 2048;
       sunLight.shadow.mapSize.height = 2048;
-      sunLight.shadow.camera.near = 10;
-      sunLight.shadow.camera.far = 260;
-      const d = 75;
+      sunLight.shadow.camera.near = 15;
+      sunLight.shadow.camera.far = 270;
+      const d = 76;
       sunLight.shadow.camera.left = -d;
       sunLight.shadow.camera.right = d;
       sunLight.shadow.camera.top = d;
       sunLight.shadow.camera.bottom = -d;
-      sunLight.shadow.bias = -0.0005;
+      sunLight.shadow.bias = -0.0004;
+      sunLight.shadow.normalBias = 0.04;
+      sunLight.shadow.radius = 2.5;
       scene.add(sunLight);
 
-      const rimLight = new THREE.DirectionalLight('#38bdf8', 0.45);
-      rimLight.position.set(70, 45, -70);
+      // Subtle cool alpine rim light from NE so rear ridges stay legible while front/east walls stay rich & dark
+      const rimLight = new THREE.DirectionalLight('#38bdf8', 0.35);
+      rimLight.position.set(70, 42, -65);
       scene.add(rimLight);
 
       // Main Diorama Group
@@ -1358,6 +1488,7 @@ export const Terrain3DMap = forwardRef<Terrain3DMapHandle, Terrain3DMapProps>(
         dioramaDataRef.current = {
           bounds,
           heights: demResult.heights,
+          rawHeights: demResult.rawHeights,
           minEle: demResult.minEle,
           maxEle: demResult.maxEle,
         };
@@ -1372,6 +1503,8 @@ export const Terrain3DMap = forwardRef<Terrain3DMapHandle, Terrain3DMapProps>(
           terrainMeshRef.current.geometry.dispose();
           const oldMat = terrainMeshRef.current.material as THREE.MeshStandardMaterial;
           oldMat.map?.dispose();
+          oldMat.normalMap?.dispose();
+          oldMat.aoMap?.dispose();
           oldMat.dispose();
           terrainMeshRef.current = null;
         }
@@ -1395,6 +1528,7 @@ export const Terrain3DMap = forwardRef<Terrain3DMapHandle, Terrain3DMapProps>(
           posAttr.setY(i, y);
         }
         planeGeom.computeVertexNormals();
+        planeGeom.setAttribute('uv2', planeGeom.attributes.uv);
 
         const mapTexture = new THREE.CanvasTexture(mapCanvas);
         mapTexture.colorSpace = THREE.SRGBColorSpace;
@@ -1402,10 +1536,21 @@ export const Terrain3DMap = forwardRef<Terrain3DMapHandle, Terrain3DMapProps>(
         mapTexture.minFilter = THREE.LinearMipmapLinearFilter;
         mapTexture.magFilter = THREE.LinearFilter;
 
+        const { normalMap, aoMap } = buildTerrainReliefMaps(
+          demResult.heights,
+          demResult.rawHeights,
+          bounds,
+          exaggerationRef.current
+        );
+
         const terrainMat = new THREE.MeshStandardMaterial({
           map: mapTexture,
-          roughness: 0.78,
-          metalness: 0.04,
+          normalMap,
+          normalScale: new THREE.Vector2(0.85, 0.85),
+          aoMap,
+          aoMapIntensity: 0.72,
+          roughness: 0.86,
+          metalness: 0.02,
         });
 
         const terrainMesh = new THREE.Mesh(planeGeom, terrainMat);
@@ -1430,8 +1575,8 @@ export const Terrain3DMap = forwardRef<Terrain3DMapHandle, Terrain3DMapProps>(
         );
         const wallsMat = new THREE.MeshStandardMaterial({
           vertexColors: true,
-          roughness: 0.88,
-          metalness: 0.05,
+          roughness: 0.9,
+          metalness: 0.04,
           side: THREE.DoubleSide,
         });
         const wallsMesh = new THREE.Mesh(wallsGeom, wallsMat);
@@ -1513,6 +1658,19 @@ export const Terrain3DMap = forwardRef<Terrain3DMapHandle, Terrain3DMapProps>(
       }
       posAttr.needsUpdate = true;
       terrainMesh.geometry.computeVertexNormals();
+
+      const terrainMat = terrainMesh.material as THREE.MeshStandardMaterial;
+      const { normalMap, aoMap } = buildTerrainReliefMaps(
+        data.heights,
+        data.rawHeights,
+        data.bounds,
+        exaggeration
+      );
+      terrainMat.normalMap?.dispose();
+      terrainMat.aoMap?.dispose();
+      terrainMat.normalMap = normalMap;
+      terrainMat.aoMap = aoMap;
+      terrainMat.needsUpdate = true;
 
       if (wallsMeshRef.current) {
         wallsMeshRef.current.geometry.dispose();

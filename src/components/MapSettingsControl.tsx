@@ -100,7 +100,7 @@ export const MapSettingsControl: React.FC<MapSettingsControlProps> = ({
       {/* Popover panel */}
       {isOpen && (
         <div
-          className={`mt-2 w-[min(320px,calc(100vw-24px))] sm:w-[330px] max-h-[min(72vh,600px)] flex flex-col bg-white/98 backdrop-blur-md rounded-2xl shadow-2xl border border-slate-200/90 overflow-hidden ${
+          className={`mt-2 w-[min(300px,calc(100vw-24px))] sm:w-[330px] max-h-[min(68vh,540px)] flex flex-col bg-white/98 backdrop-blur-md rounded-2xl shadow-2xl border border-slate-200/90 overflow-hidden ${
             align === 'right' ? 'right-0 absolute' : 'left-0 absolute'
           }`}
         >

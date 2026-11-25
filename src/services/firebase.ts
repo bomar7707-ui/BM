@@ -3,6 +3,10 @@ import { getAuth, signInAnonymously } from 'firebase/auth';
 import {
   getFirestore,
   initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  disableNetwork,
+  enableNetwork,
   collection,
   doc,
   addDoc,
@@ -16,6 +20,7 @@ import {
 import { Hike, HikeActivity, RoutePart, PlannedRoute, ParticipantProfile } from '../types';
 import { resolveGpxVal, calculateCoordsDistanceKm } from '../utils/gpxParser';
 import { normalizeHikeActivity } from '../components/ActivityBadge';
+import { isEffectivelyOffline } from '../utils/offlineManager';
 
 const firebaseConfig = {
   apiKey: "AIzaSyDg0j8KCyc-QlSjI80b-CsyLA1pecMlLVE",
@@ -33,9 +38,18 @@ try {
   const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
   auth = getAuth(app);
   try {
-    db = initializeFirestore(app, { experimentalForceLongPolling: true });
+    db = initializeFirestore(app, {
+      localCache: persistentLocalCache({
+        tabManager: persistentMultipleTabManager(),
+      }),
+      experimentalForceLongPolling: true,
+    });
   } catch {
-    db = getFirestore(app);
+    try {
+      db = initializeFirestore(app, { experimentalForceLongPolling: true });
+    } catch {
+      db = getFirestore(app);
+    }
   }
 } catch (e) {
   console.warn("Firebase initialization warning:", e);
@@ -43,11 +57,25 @@ try {
 
 export { db, auth };
 
+export async function setFirestoreNetworkEnabled(enabled: boolean): Promise<void> {
+  if (!db) return;
+  try {
+    if (enabled) {
+      await enableNetwork(db);
+    } else {
+      await disableNetwork(db);
+    }
+  } catch (e) {
+    console.warn('Firestore network toggle warning:', e);
+  }
+}
+
 let pendingAuthPromise: Promise<void> | null = null;
 
 export async function ensureAuth(): Promise<void> {
   if (!auth) return;
   if (auth.currentUser) return;
+  if (isEffectivelyOffline()) return;
 
   if (!pendingAuthPromise) {
     const timeoutPromise = new Promise<void>((resolve) => setTimeout(resolve, 4000));

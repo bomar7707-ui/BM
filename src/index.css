@@ -82,7 +82,71 @@
   background: #94a3b8;
 }
 
+/* Mobile 9:16 display layout (< 768px) */
+.mobile-9-16-outer {
+  width: 100%;
+  min-height: 100vh;
+}
+
+.mobile-9-16-frame {
+  width: 100%;
+  min-height: 100vh;
+  position: relative;
+}
+
+@media screen and (max-width: 767px) {
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+    background-color: #1c1917;
+  }
+
+  .mobile-9-16-outer {
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: #1c1917;
+    overflow: hidden;
+  }
+
+  .mobile-9-16-frame {
+    width: min(100vw, calc(100vh * 9 / 16));
+    width: min(100vw, calc(100dvh * 9 / 16));
+    height: min(100vh, calc(100vw * 16 / 9));
+    height: min(100dvh, calc(100vw * 16 / 9));
+    min-height: 0;
+    aspect-ratio: 9 / 16;
+    overflow: hidden;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
+  }
+}
+
 @media print {
+  html,
+  body,
+  #root {
+    height: auto !important;
+    overflow: visible !important;
+    background-color: #ffffff !important;
+  }
+
+  .mobile-9-16-outer,
+  .mobile-9-16-frame {
+    width: 100% !important;
+    height: auto !important;
+    min-height: 0 !important;
+    aspect-ratio: auto !important;
+    overflow: visible !important;
+    background-color: #ffffff !important;
+    box-shadow: none !important;
+  }
+
   .no-print {
     display: none !important;
   }

@@ -15,9 +15,12 @@ import {
   Trophy,
   Route,
   Compass,
+  WifiOff,
+  Smartphone,
 } from 'lucide-react';
 import { HikerIcon } from './ParticipantsView';
 import { LOGO_DATA_URL } from '../assets/logoDataUrl';
+import { usePWAInstall } from '../hooks/usePWAInstall';
 
 export type ActiveTab =
   | 'journal'
@@ -35,6 +38,10 @@ interface NavbarProps {
   activeTab: ActiveTab;
   setActiveTab: (tab: ActiveTab) => void;
   isConnected: boolean;
+  isOffline: boolean;
+  isManualOffline: boolean;
+  pendingSyncCount: number;
+  onOpenOfflineModal: () => void;
   totalDistance?: number;
   totalTrips?: number;
   onNewHikeClick?: () => void;
@@ -48,6 +55,10 @@ export const Navbar: React.FC<NavbarProps> = ({
   activeTab,
   setActiveTab,
   isConnected,
+  isOffline,
+  isManualOffline,
+  pendingSyncCount,
+  onOpenOfflineModal,
   onExportJson,
   onExportExcel,
   onImportJson,
@@ -58,6 +69,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const gpxInputRef = useRef<HTMLInputElement>(null);
   const dataMenuRef = useRef<HTMLDivElement>(null);
+  const { canInstall, isInstalled, install } = usePWAInstall();
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -79,7 +91,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   ];
 
   return (
-    <header className="bg-white border-b border-stone-200 sticky top-0 z-[1500] shadow-xs select-none">
+    <header className="bg-white border-b border-stone-200 sticky top-0 z-[1500] shadow-xs select-none shrink-0">
       <div className="max-w-7xl mx-auto px-3 sm:px-6">
         <div className="flex items-center justify-between h-16">
           {/* Brand */}
@@ -131,28 +143,50 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {/* Right Status & Quick Actions */}
           <div className="flex items-center gap-2">
-            {/* Status Indicator */}
-            <div
-              className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border ${
-                isConnected
-                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                  : 'bg-amber-50 text-amber-700 border-amber-200'
+            {/* Offline / Cloud Status Button (clickable on both mobile and desktop) */}
+            <button
+              type="button"
+              onClick={onOpenOfflineModal}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-semibold border transition-all cursor-pointer active:scale-95 ${
+                isOffline
+                  ? 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300'
+                  : isConnected
+                  ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200'
+                  : 'bg-amber-50 hover:bg-amber-100 text-amber-700 border-amber-200'
               }`}
-              title={isConnected ? 'Připojeno k Firebase Cloudu' : 'Režim offline / lokální paměť'}
+              title={
+                isManualOffline
+                  ? 'Ruční offline režim – klikněte pro nastavení a stažení map'
+                  : isOffline
+                  ? 'Offline režim (bez signálu) – klikněte pro správu'
+                  : isConnected
+                  ? 'Připojeno k Firebase Cloudu – klikněte pro offline režim a mapy'
+                  : 'Lokální paměť – klikněte pro offline režim a synchronizaci'
+              }
             >
-              {isConnected ? (
+              {isOffline ? (
                 <>
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                  <Cloud className="w-3.5 h-3.5 text-emerald-600" />
-                  <span className="text-[11px]">Cloud</span>
+                  <WifiOff className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                  <span className="text-[11px]">Offline</span>
+                </>
+              ) : isConnected ? (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
+                  <Cloud className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span className="text-[11px] hidden sm:inline">Cloud</span>
                 </>
               ) : (
                 <>
-                  <CloudOff className="w-3.5 h-3.5 text-amber-600" />
-                  <span className="text-[11px]">Lokální</span>
+                  <CloudOff className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                  <span className="text-[11px] hidden sm:inline">Lokální</span>
                 </>
               )}
-            </div>
+              {pendingSyncCount > 0 && (
+                <span className="ml-0.5 px-1.5 py-0.2 rounded-full bg-amber-600 text-white text-[10px] font-extrabold leading-tight">
+                  {pendingSyncCount}
+                </span>
+              )}
+            </button>
 
             {/* Desktop Tisk a PDF Button */}
             <button
@@ -263,6 +297,31 @@ export const Navbar: React.FC<NavbarProps> = ({
                       <Upload className="w-4 h-4 text-indigo-600 shrink-0" />
                       <span>Importovat JSON</span>
                     </button>
+                    <div className="border-t border-stone-100 my-1"></div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDataMenuOpen(false);
+                        onOpenOfflineModal();
+                      }}
+                      className="w-full text-left px-2.5 py-2 hover:bg-amber-50 rounded-lg flex items-center gap-2.5 text-stone-700 hover:text-amber-900 font-semibold transition-colors cursor-pointer"
+                    >
+                      <WifiOff className="w-4 h-4 text-amber-600 shrink-0" />
+                      <span>Offline režim a mapy</span>
+                    </button>
+                    {canInstall && !isInstalled && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDataMenuOpen(false);
+                          void install();
+                        }}
+                        className="w-full text-left px-2.5 py-2 hover:bg-emerald-50 rounded-lg flex items-center gap-2.5 text-emerald-700 font-bold transition-colors cursor-pointer"
+                      >
+                        <Smartphone className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <span>Nainstalovat aplikaci</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
@@ -271,9 +330,9 @@ export const Navbar: React.FC<NavbarProps> = ({
             {/* Version Label next to Export */}
             <span
               className="hidden md:inline-block text-[10px] font-medium text-stone-400 select-none ml-0.5"
-              title="Verze aplikace 4.0"
+              title="Verze aplikace 4.1"
             >
-              v4.0
+              v4.1
             </span>
 
             {/* Hidden File Inputs (shared between desktop and mobile) */}
@@ -440,7 +499,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <div className="text-[10px] font-bold uppercase tracking-wider text-stone-400">
                   GPX soubory, záloha a export dat
                 </div>
-                <span className="text-[10px] font-medium text-stone-400 select-none">v4.0</span>
+                <span className="text-[10px] font-medium text-stone-400 select-none">v4.1</span>
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <button
@@ -490,6 +549,39 @@ export const Navbar: React.FC<NavbarProps> = ({
                   <Upload className="w-4 h-4 text-indigo-600 shrink-0" />
                   <span>Import JSON</span>
                 </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    onOpenOfflineModal();
+                  }}
+                  className={`flex items-center gap-2 p-2.5 rounded-xl text-xs font-bold text-left border ${
+                    isOffline
+                      ? 'bg-amber-50 hover:bg-amber-100 text-amber-900 border-amber-300'
+                      : 'bg-stone-50 hover:bg-stone-100 text-stone-800 border-stone-200'
+                  } ${canInstall && !isInstalled ? '' : 'col-span-2'}`}
+                >
+                  <WifiOff className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>
+                    Offline režim a mapy
+                    {pendingSyncCount > 0 ? ` (${pendingSyncCount})` : ''}
+                  </span>
+                </button>
+
+                {canInstall && !isInstalled && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMobileMenuOpen(false);
+                      void install();
+                    }}
+                    className="flex items-center gap-2 p-2.5 rounded-xl text-xs font-bold bg-stone-900 hover:bg-stone-800 text-white text-left"
+                  >
+                    <Smartphone className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>Nainstalovat</span>
+                  </button>
+                )}
               </div>
             </div>
           </div>

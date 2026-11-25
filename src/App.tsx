@@ -12,6 +12,8 @@ import { ParticipantsView } from './components/ParticipantsView';
 import { AccommodationView } from './components/AccommodationView';
 import { Toast, ToastType } from './components/Toast';
 import { ConfirmModal } from './components/ConfirmModal';
+import { OfflineModal } from './components/OfflineModal';
+import { OfflineIndicator } from './components/OfflineIndicator';
 import { Hike, HikeActivity, FilterState, RoutePart, PlannedRoute, ParticipantProfile } from './types';
 import {
   subscribeToHikesLive,
@@ -30,6 +32,7 @@ import {
   loadParticipantsFromStorage,
   subscribeToParticipantsLive,
   saveParticipantProfile,
+  setFirestoreNetworkEnabled,
 } from './services/firebase';
 import { exportHikesToExcel } from './utils/excelExport';
 import {
@@ -39,6 +42,13 @@ import {
 } from './utils/gpxParser';
 import { evaluateMilestonesForParticipant } from './utils/milestonesUtils';
 import { sendMilestoneEmailNotification, downloadMilestoneCardPng } from './utils/milestoneCardGenerator';
+import {
+  useOfflineMode,
+  useOfflineSyncQueue,
+  enqueueOfflineOp,
+  syncPendingOfflineOps,
+  getPendingOfflineOps,
+} from './utils/offlineManager';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('map');
@@ -61,6 +71,12 @@ export default function App() {
   const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
   const [selectedMapIndex, setSelectedMapIndex] = useState<number | null>(null);
   const [selectedPlannedRouteId, setSelectedPlannedRouteId] = useState<string | null>(null);
+
+  // Offline mode & sync queue state
+  const { isOnline, isManualOffline, isOffline, setManualOffline } = useOfflineMode();
+  const { pendingCount } = useOfflineSyncQueue();
+  const [isOfflineModalOpen, setIsOfflineModalOpen] = useState<boolean>(false);
+  const [isSyncingOffline, setIsSyncingOffline] = useState<boolean>(false);
 
   // Isolated state for Planned Routes (Plánované trasy)
   const [plannedRoutes, setPlannedRoutes] = useState<PlannedRoute[]>(() =>
@@ -105,12 +121,28 @@ export default function App() {
     onConfirm: () => {},
   });
 
+  // Sync Firestore network state with Manual Offline Mode toggle
+  useEffect(() => {
+    void setFirestoreNetworkEnabled(!isManualOffline);
+    if (isManualOffline || !isOnline) {
+      setIsConnected(false);
+    }
+  }, [isManualOffline, isOnline]);
+
   // Subscribe to Firebase Live Snapshot
   useEffect(() => {
     const unsubscribe = subscribeToHikesLive(
       (data) => {
-        setHikes(data);
-        setIsConnected(true);
+        // Avoid wiping unsynced local edits while offline
+        const hasPendingHikeOps = getPendingOfflineOps().some(
+          (o) => o.type === 'add_hike' || o.type === 'update_hike' || o.type === 'delete_hike'
+        );
+        if (!hasPendingHikeOps) {
+          if (data.length > 0 || !isOffline) {
+            setHikes(data);
+          }
+        }
+        setIsConnected(!isOffline);
         setIsInitialDataLoaded(true);
       },
       (err) => {
@@ -128,7 +160,7 @@ export default function App() {
       window.clearTimeout(dataFallbackTimer);
       unsubscribe();
     };
-  }, []);
+  }, [isOffline]);
 
   // Minimum splash display duration & fallback safety timer
   useEffect(() => {
@@ -160,12 +192,18 @@ export default function App() {
   // Subscribe to Planned Routes Live Snapshot
   useEffect(() => {
     const unsubscribePlanned = subscribeToPlannedRoutesLive((data) => {
-      setPlannedRoutes(data);
+      const hasPendingPlannedOps = getPendingOfflineOps().some(
+        (o) =>
+          o.type === 'add_planned' || o.type === 'update_planned' || o.type === 'delete_planned'
+      );
+      if (!hasPendingPlannedOps && (data.length > 0 || !isOffline)) {
+        setPlannedRoutes(data);
+      }
     });
     return () => {
       unsubscribePlanned();
     };
-  }, []);
+  }, [isOffline]);
 
   // Subscribe to Participant Profiles Live Snapshot
   useEffect(() => {
@@ -176,6 +214,86 @@ export default function App() {
       unsubscribeParticipants();
     };
   }, []);
+
+  // Replay pending offline edits back to Firebase Cloud
+  const handleSyncOfflineQueue = useCallback(
+    async (showFeedback = false) => {
+      if (isOffline) {
+        if (showFeedback) {
+          showToast('Jste v offline režimu. Pro synchronizaci se připojte k internetu.', 'warning');
+        }
+        return;
+      }
+
+      const queuedCount = getPendingOfflineOps().length;
+      setIsSyncingOffline(true);
+      try {
+        if (queuedCount > 0) {
+          const { synced, failed } = await syncPendingOfflineOps({
+            addHike,
+            updateHike,
+            deleteHike,
+            addPlannedRoute,
+            updatePlannedRoute,
+            deletePlannedRoute,
+          });
+          if (synced > 0) {
+            try {
+              const fresh = await fetchAllHikes();
+              setHikes(fresh);
+              setIsConnected(true);
+            } catch {
+              // Snapshot listener will catch up
+            }
+            showToast(
+              failed > 0
+                ? `Synchronizováno ${synced} změn (${failed} zůstalo ve frontě).`
+                : `Synchronizováno ${synced} offline změn s Cloudem!`,
+              failed > 0 ? 'warning' : 'success'
+            );
+          } else if (showFeedback && failed > 0) {
+            showToast('Synchronizace se nezdařila. Zkuste to za chvíli znovu.', 'error');
+          }
+        } else if (showFeedback) {
+          const fresh = await fetchAllHikes();
+          setHikes(fresh);
+          setIsConnected(true);
+          showToast(`Úspěšně načteno ${fresh.length} tras z Cloudu.`, 'success');
+        }
+      } catch (err: unknown) {
+        if (showFeedback) {
+          const e = err as Error;
+          showToast(`Chyba synchronizace: ${e?.message || 'Zkontrolujte připojení'}`, 'error');
+        }
+      } finally {
+        setIsSyncingOffline(false);
+      }
+    },
+    [isOffline, showToast]
+  );
+
+  // Auto-sync queued changes when device comes back online
+  useEffect(() => {
+    if (!isOffline && pendingCount > 0 && !isSyncingOffline) {
+      const timer = window.setTimeout(() => {
+        void handleSyncOfflineQueue(false);
+      }, 900);
+      return () => window.clearTimeout(timer);
+    }
+  }, [isOffline, pendingCount, isSyncingOffline, handleSyncOfflineQueue]);
+
+  const handleToggleManualOffline = useCallback(
+    (enabled: boolean) => {
+      setManualOffline(enabled);
+      showToast(
+        enabled
+          ? 'Ruční offline režim byl zapnut. Aplikace pracuje z uložených dat a map.'
+          : 'Ruční offline režim byl vypnut.',
+        enabled ? 'warning' : 'success'
+      );
+    },
+    [setManualOffline, showToast]
+  );
 
   // Total stats (excluding non-contiguous transfers / přejezdy)
   const { totalDistance, totalTrips } = useMemo(() => {
@@ -253,7 +371,7 @@ export default function App() {
     }
   };
 
-  // Handle saving new or edited hike
+  // Handle saving new or edited hike (seamless online + offline support)
   const handleSaveHike = async (hikeData: {
     name: string;
     distance: number;
@@ -267,7 +385,6 @@ export default function App() {
     const previousHikes = [...hikes];
 
     if (editingHike) {
-      await updateHike(editingHike.id, hikeData);
       const simulatedUpdated: Hike = {
         ...editingHike,
         name: hikeData.name,
@@ -284,13 +401,32 @@ export default function App() {
       const updatedList = previousHikes.map((h) =>
         h.id === editingHike.id ? simulatedUpdated : h
       );
-      setEditingHike(null);
-      showToast('Výšlap byl úspěšně upraven v cloudu', 'success');
-      await checkAndNotifyNewMilestones(previousHikes, updatedList, hikeData.participants);
+
+      if (isOffline) {
+        setHikes(updatedList);
+        saveHikesToStorageSafe(updatedList);
+        enqueueOfflineOp({ type: 'update_hike', id: editingHike.id, payload: hikeData });
+        setEditingHike(null);
+        showToast('Výšlap uložen v offline režimu (odešle se po připojení)', 'warning');
+        return;
+      }
+
+      try {
+        await updateHike(editingHike.id, hikeData);
+        setEditingHike(null);
+        showToast('Výšlap byl úspěšně upraven v cloudu', 'success');
+        await checkAndNotifyNewMilestones(previousHikes, updatedList, hikeData.participants);
+      } catch {
+        setHikes(updatedList);
+        saveHikesToStorageSafe(updatedList);
+        enqueueOfflineOp({ type: 'update_hike', id: editingHike.id, payload: hikeData });
+        setEditingHike(null);
+        showToast('Výšlap uložen lokálně (odešle se po připojení)', 'warning');
+      }
     } else {
-      const newId = await addHike(hikeData);
-      const simulatedNew: Hike = {
-        id: newId,
+      const localId = `offline_hike_${Date.now()}`;
+      const makeHike = (id: string): Hike => ({
+        id,
         name: hikeData.name,
         distance: hikeData.distance.toFixed(1),
         date: hikeData.date,
@@ -301,31 +437,67 @@ export default function App() {
         activity: hikeData.activity,
         routes: hikeData.routes,
         maps: hikeData.routes,
-      };
-      const updatedList = [simulatedNew, ...previousHikes];
-      showToast('Nový výšlap byl úspěšně uložen do cloudu', 'success');
-      await checkAndNotifyNewMilestones(previousHikes, updatedList, hikeData.participants);
+      });
+
+      if (isOffline) {
+        const updatedList = [makeHike(localId), ...previousHikes];
+        setHikes(updatedList);
+        saveHikesToStorageSafe(updatedList);
+        enqueueOfflineOp({ type: 'add_hike', localId, payload: hikeData });
+        showToast('Nový výšlap uložen v offline režimu (odešle se po připojení)', 'warning');
+        return;
+      }
+
+      try {
+        const newId = await addHike(hikeData);
+        const updatedList = [makeHike(newId), ...previousHikes];
+        showToast('Nový výšlap byl úspěšně uložen do cloudu', 'success');
+        await checkAndNotifyNewMilestones(previousHikes, updatedList, hikeData.participants);
+      } catch {
+        const updatedList = [makeHike(localId), ...previousHikes];
+        setHikes(updatedList);
+        saveHikesToStorageSafe(updatedList);
+        enqueueOfflineOp({ type: 'add_hike', localId, payload: hikeData });
+        showToast('Nový výšlap uložen lokálně (odešle se po připojení)', 'warning');
+      }
     }
   };
 
-  // Handle delete hike
+  // Handle delete hike (seamless online + offline support)
   const handleDeleteHike = (id: string) => {
     const hike = hikes.find((h) => h.id === id);
     setConfirmModal({
       isOpen: true,
-      title: 'Smazat záznam z Cloudu',
-      message: `Opravdu chcete smazat výšlap "${hike?.name || 'Zvolený výšlap'}"? Data budou trvale odstraněna z Firebase.`,
+      title: isOffline ? 'Smazat záznam (offline)' : 'Smazat záznam z Cloudu',
+      message: isOffline
+        ? `Opravdu chcete smazat výšlap "${hike?.name || 'Zvolený výšlap'}"? Smazání se provede lokálně a po připojení se propíše do Cloudu.`
+        : `Opravdu chcete smazat výšlap "${hike?.name || 'Zvolený výšlap'}"? Data budou trvale odstraněna z Firebase.`,
       confirmText: 'Ano, smazat',
       isDestructive: true,
       onConfirm: async () => {
         try {
-          await deleteHike(id);
+          if (isOffline) {
+            const next = hikes.filter((h) => h.id !== id);
+            setHikes(next);
+            saveHikesToStorageSafe(next);
+            enqueueOfflineOp({ type: 'delete_hike', id });
+            if (editingHike?.id === id) setEditingHike(null);
+            if (selectedTripId === id) setSelectedTripId(null);
+            showToast('Výšlap smazán lokálně (propíše se po připojení)', 'warning');
+          } else {
+            await deleteHike(id);
+            if (editingHike?.id === id) setEditingHike(null);
+            if (selectedTripId === id) setSelectedTripId(null);
+            showToast('Výšlap byl smazán z cloudu', 'success');
+          }
+        } catch {
+          const next = hikes.filter((h) => h.id !== id);
+          setHikes(next);
+          saveHikesToStorageSafe(next);
+          enqueueOfflineOp({ type: 'delete_hike', id });
           if (editingHike?.id === id) setEditingHike(null);
           if (selectedTripId === id) setSelectedTripId(null);
-          showToast('Výšlap byl smazán z cloudu', 'success');
-        } catch (err: unknown) {
-          const e = err as Error;
-          showToast(`Chyba při mazání: ${e?.message || 'Zkuste to znovu'}`, 'error');
+          showToast('Výšlap smazán lokálně (propíše se po připojení)', 'warning');
         } finally {
           setConfirmModal((prev) => ({ ...prev, isOpen: false }));
         }
@@ -333,7 +505,7 @@ export default function App() {
     });
   };
 
-  // Handle save or update Planned Route
+  // Handle save or update Planned Route (seamless online + offline support)
   const handleSavePlannedRoute = async (
     routeData: {
       name: string;
@@ -358,6 +530,14 @@ export default function App() {
         coordinates: routeData.routes[0]?.coordinates || [],
         routes: routeData.routes,
       };
+      if (isOffline) {
+        const next = plannedRoutes.map((r) => (r.id === editingId ? updatedItem : r));
+        setPlannedRoutes(next);
+        savePlannedRoutesToStorageSafe(next);
+        enqueueOfflineOp({ type: 'update_planned', id: editingId, payload: routeData });
+        showToast('Plánovaná trasa upravena offline (odešle se po připojení)', 'warning');
+        return editingId;
+      }
       try {
         await updatePlannedRoute(editingId, routeData);
         showToast('Plánovaná trasa byla upravena', 'success');
@@ -365,15 +545,12 @@ export default function App() {
         const next = plannedRoutes.map((r) => (r.id === editingId ? updatedItem : r));
         setPlannedRoutes(next);
         savePlannedRoutesToStorageSafe(next);
-        showToast('Plánovaná trasa byla upravena lokálně', 'success');
+        enqueueOfflineOp({ type: 'update_planned', id: editingId, payload: routeData });
+        showToast('Plánovaná trasa upravena lokálně (odešle se po připojení)', 'warning');
       }
       return editingId;
     } else {
-      try {
-        const newId = await addPlannedRoute(routeData);
-        showToast('Plánovaná trasa byla uložena', 'success');
-        return newId;
-      } catch {
+      const saveLocally = () => {
         const localId = 'plan_' + Date.now();
         const newItem: PlannedRoute = {
           id: localId,
@@ -391,13 +568,25 @@ export default function App() {
         const next = [newItem, ...plannedRoutes];
         setPlannedRoutes(next);
         savePlannedRoutesToStorageSafe(next);
-        showToast('Plánovaná trasa uložena do paměti prohlížeče', 'success');
+        enqueueOfflineOp({ type: 'add_planned', localId, payload: routeData });
+        showToast('Plánovaná trasa uložena lokálně (odešle se po připojení)', 'warning');
         return localId;
+      };
+
+      if (isOffline) {
+        return saveLocally();
+      }
+      try {
+        const newId = await addPlannedRoute(routeData);
+        showToast('Plánovaná trasa byla uložena', 'success');
+        return newId;
+      } catch {
+        return saveLocally();
       }
     }
   };
 
-  // Handle delete Planned Route
+  // Handle delete Planned Route (seamless online + offline support)
   const handleDeletePlannedRoute = (id: string) => {
     const target = plannedRoutes.find((r) => r.id === id);
     setConfirmModal({
@@ -407,17 +596,27 @@ export default function App() {
       confirmText: 'Ano, smazat',
       isDestructive: true,
       onConfirm: async () => {
+        const removeLocal = (queueForSync: boolean) => {
+          const next = plannedRoutes.filter((r) => r.id !== id);
+          setPlannedRoutes(next);
+          savePlannedRoutesToStorageSafe(next);
+          if (queueForSync) {
+            enqueueOfflineOp({ type: 'delete_planned', id });
+          }
+        };
+
         try {
-          await deletePlannedRoute(id);
-          const next = plannedRoutes.filter((r) => r.id !== id);
-          setPlannedRoutes(next);
-          savePlannedRoutesToStorageSafe(next);
-          showToast('Plánovaná trasa byla smazána', 'success');
+          if (isOffline) {
+            removeLocal(true);
+            showToast('Plánovaná trasa smazána lokálně (propíše se po připojení)', 'warning');
+          } else {
+            await deletePlannedRoute(id);
+            removeLocal(false);
+            showToast('Plánovaná trasa byla smazána', 'success');
+          }
         } catch {
-          const next = plannedRoutes.filter((r) => r.id !== id);
-          setPlannedRoutes(next);
-          savePlannedRoutesToStorageSafe(next);
-          showToast('Plánovaná trasa byla odstraněna', 'success');
+          removeLocal(true);
+          showToast('Plánovaná trasa smazána lokálně (propíše se po připojení)', 'warning');
         } finally {
           setConfirmModal((prev) => ({ ...prev, isOpen: false }));
         }
@@ -440,11 +639,12 @@ export default function App() {
 
   // Manual Cloud refresh
   const handleRefreshCloud = async () => {
+    if (isOffline) {
+      showToast('Jste v offline režimu – zobrazují se uložená lokální data.', 'warning');
+      return;
+    }
     try {
-      const data = await fetchAllHikes();
-      setHikes(data);
-      setIsConnected(true);
-      showToast(`Úspěšně načteno ${data.length} tras ze Zápisníku!`, 'success');
+      await handleSyncOfflineQueue(true);
     } catch (err: unknown) {
       const e = err as Error;
       showToast(`Chyba synchronizace: ${e?.message || 'Zkontrolujte připojení'}`, 'error');
@@ -453,23 +653,34 @@ export default function App() {
 
   // Add GPX directly to archive
   const handleAddGpxTrip = async (newTrip: Hike): Promise<string> => {
+    const payload = {
+      name: newTrip.name,
+      distance:
+        typeof newTrip.distance === 'string' ? parseFloat(newTrip.distance) : newTrip.distance,
+      date: newTrip.date,
+      routes: newTrip.routes || [],
+    };
+
+    const saveLocalGpx = () => {
+      const updated = [newTrip, ...hikes];
+      setHikes(updated);
+      saveHikesToStorageSafe(updated);
+      enqueueOfflineOp({ type: 'add_hike', localId: newTrip.id, payload });
+      showToast('GPX uloženo lokálně (odešle se po připojení)', 'warning');
+      return newTrip.id;
+    };
+
+    if (isOffline) {
+      return saveLocalGpx();
+    }
+
     try {
-      const docId = await addHike({
-        name: newTrip.name,
-        distance: typeof newTrip.distance === 'string' ? parseFloat(newTrip.distance) : newTrip.distance,
-        date: newTrip.date,
-        routes: newTrip.routes || [],
-      });
+      const docId = await addHike(payload);
       newTrip.id = docId;
       showToast('GPX trasa byla uložena do archívu', 'success');
       return docId;
     } catch {
-      // Save locally if cloud write fails
-      const updated = [newTrip, ...hikes];
-      setHikes(updated);
-      saveHikesToStorageSafe(updated);
-      showToast('GPX nahráno do lokální paměti', 'warning');
-      return newTrip.id;
+      return saveLocalGpx();
     }
   };
 
@@ -630,80 +841,116 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-stone-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-white">
-      {/* Full-Screen Logo Loading Screen on App Startup & Before Map Loads */}
-      {!splashRemoved && (
-        <div
-          className={`fixed inset-0 z-[9999] bg-[#fbfaf5] flex flex-col items-center justify-center select-none overflow-hidden transition-opacity duration-500 ${
-            isAppAndMapLoaded ? 'opacity-0 pointer-events-none' : 'opacity-100'
-          }`}
-          aria-label="Načítání aplikace Horský zápisník"
-        >
-          <div className="w-[min(94vw,86vh)] h-[min(94vw,86vh)] flex items-center justify-center overflow-hidden">
-            <img
-              src={`${import.meta.env.BASE_URL}assets/aistudio/Gemini_Generated_Image_sdhf1zsdhf1zsdhf_fd6937b9.jpg`}
-              alt="Horský zápisník logo"
-              className="w-full h-full object-cover scale-[1.06] mix-blend-multiply animate-pulse"
-              style={{ animationDuration: '2.8s' }}
-            />
+    <div className="mobile-9-16-outer">
+      <div className="mobile-9-16-frame bg-stone-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-white">
+        {/* Full-Screen Logo Loading Screen on App Startup & Before Map Loads */}
+        {!splashRemoved && (
+          <div
+            className={`absolute md:fixed inset-0 z-[9999] bg-[#fbfaf5] flex flex-col items-center justify-center select-none overflow-hidden transition-opacity duration-500 ${
+              isAppAndMapLoaded ? 'opacity-0 pointer-events-none' : 'opacity-100'
+            }`}
+            aria-label="Načítání aplikace Horský zápisník"
+          >
+            <div className="w-[90%] aspect-square md:w-[min(94vw,86vh)] md:h-[min(94vw,86vh)] flex items-center justify-center overflow-hidden">
+              <img
+                src={`${import.meta.env.BASE_URL}assets/aistudio/Gemini_Generated_Image_sdhf1zsdhf1zsdhf_fd6937b9.jpg`}
+                alt="Horský zápisník logo"
+                className="w-full h-full object-cover scale-[1.06] mix-blend-multiply animate-pulse"
+                style={{ animationDuration: '2.8s' }}
+              />
+            </div>
+            <div className="absolute bottom-6 sm:bottom-8 flex items-center gap-2.5 px-4 py-1.5 rounded-full bg-stone-900/5 border border-stone-900/10 text-stone-700 text-xs sm:text-sm font-bold tracking-wide">
+              <span className="w-2 h-2 rounded-full bg-emerald-600 animate-ping" />
+              <span>Načítání mapy a tras…</span>
+            </div>
           </div>
-          <div className="absolute bottom-6 sm:bottom-8 flex items-center gap-2.5 px-4 py-1.5 rounded-full bg-stone-900/5 border border-stone-900/10 text-stone-700 text-xs sm:text-sm font-bold tracking-wide">
-            <span className="w-2 h-2 rounded-full bg-emerald-600 animate-ping" />
-            <span>Načítání mapy a tras…</span>
-          </div>
-        </div>
-      )}
+        )}
 
-      {/* Toast Notification */}
-      <Toast
-        message={toast.message}
-        type={toast.type}
-        onClose={() => setToast((prev) => ({ ...prev, message: null }))}
-      />
+        {/* Toast Notification */}
+        <Toast
+          message={toast.message}
+          type={toast.type}
+          onClose={() => setToast((prev) => ({ ...prev, message: null }))}
+        />
 
-      {/* Confirmation Dialog */}
-      <ConfirmModal
-        isOpen={confirmModal.isOpen}
-        title={confirmModal.title}
-        message={confirmModal.message}
-        confirmText={confirmModal.confirmText}
-        isDestructive={confirmModal.isDestructive}
-        onConfirm={confirmModal.onConfirm}
-        onCancel={() => setConfirmModal((prev) => ({ ...prev, isOpen: false }))}
-      />
+        {/* Confirmation Dialog */}
+        <ConfirmModal
+          isOpen={confirmModal.isOpen}
+          title={confirmModal.title}
+          message={confirmModal.message}
+          confirmText={confirmModal.confirmText}
+          isDestructive={confirmModal.isDestructive}
+          onConfirm={confirmModal.onConfirm}
+          onCancel={() => setConfirmModal((prev) => ({ ...prev, isOpen: false }))}
+        />
 
-      {/* Printable Report View (Full Page) */}
-      {activeTab === 'print' ? (
-        <PrintReportView
+        {/* Offline Mode & Map Download Modal */}
+        <OfflineModal
+          isOpen={isOfflineModalOpen}
+          onClose={() => setIsOfflineModalOpen(false)}
+          isOnline={isOnline}
+          isManualOffline={isManualOffline}
+          onToggleManualOffline={handleToggleManualOffline}
+          isConnected={isConnected}
           hikes={hikes}
-          filterState={filterState}
-          onFilterChange={(newFilters) =>
-            setFilterState((prev) => ({ ...prev, ...newFilters }))
+          plannedRoutes={plannedRoutes}
+          selectedTrip={hikes.find((h) => h.id === selectedTripId) || null}
+          selectedPlannedRoute={
+            plannedRoutes.find((r) => r.id === selectedPlannedRouteId) || null
           }
-          onBack={() => setActiveTab('map')}
+          pendingCount={pendingCount}
+          isSyncing={isSyncingOffline}
+          onSyncNow={() => handleSyncOfflineQueue(true)}
           onNotify={showToast}
         />
-      ) : (
-        <>
-          {/* Top Navbar */}
-          <Navbar
-            activeTab={activeTab}
-            setActiveTab={setActiveTab}
-            isConnected={isConnected}
-            totalDistance={totalDistance}
-            totalTrips={totalTrips}
-            onNewHikeClick={() => {
-              setEditingHike(null);
-              setActiveTab('journal');
-            }}
-            onExportJson={handleExportJson}
-            onExportExcel={handleExportExcel}
-            onImportJson={handleImportJson}
-            onImportGpx={handleImportGpx}
-          />
 
-          {/* Main Views Container */}
-          <main className="flex-1">
+        {/* Non-intrusive Offline Status Banner */}
+        <OfflineIndicator
+          isOnline={isOnline}
+          isManualOffline={isManualOffline}
+          pendingCount={pendingCount}
+          isSyncing={isSyncingOffline}
+          onClick={() => setIsOfflineModalOpen(true)}
+        />
+
+        {/* Printable Report View (Full Page) */}
+        {activeTab === 'print' ? (
+          <div className="flex-1 min-h-0 overflow-y-auto md:overflow-visible">
+            <PrintReportView
+              hikes={hikes}
+              filterState={filterState}
+              onFilterChange={(newFilters) =>
+                setFilterState((prev) => ({ ...prev, ...newFilters }))
+              }
+              onBack={() => setActiveTab('map')}
+              onNotify={showToast}
+            />
+          </div>
+        ) : (
+          <>
+            {/* Top Navbar */}
+            <Navbar
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+              isConnected={isConnected}
+              isOffline={isOffline}
+              isManualOffline={isManualOffline}
+              pendingSyncCount={pendingCount}
+              onOpenOfflineModal={() => setIsOfflineModalOpen(true)}
+              totalDistance={totalDistance}
+              totalTrips={totalTrips}
+              onNewHikeClick={() => {
+                setEditingHike(null);
+                setActiveTab('journal');
+              }}
+              onExportJson={handleExportJson}
+              onExportExcel={handleExportExcel}
+              onImportJson={handleImportJson}
+              onImportGpx={handleImportGpx}
+            />
+
+            {/* Main Views Container */}
+            <main className="flex-1 min-h-0 flex flex-col overflow-y-auto md:block md:overflow-visible">
             {/* TAB 1: Zápisník (Journal) */}
             {activeTab === 'journal' && (
               <div className="max-w-4xl mx-auto px-4 py-6 sm:py-8 space-y-7">
@@ -842,9 +1089,10 @@ export default function App() {
                 onNotify={showToast}
               />
             )}
-          </main>
-        </>
-      )}
+            </main>
+          </>
+        )}
+      </div>
     </div>
   );
 }
